@@ -1,21 +1,17 @@
 """
-Script de entrenamiento para el Cubo de Rubik usando Curriculum Learning.
+Script de entrenamiento para el Cubo de Rubik con ResNet y PPO.
 
-Basado en recomendaciones de papers academicos:
-- DeepCubeA (McAleer et al., 2019)
-- Autodidactic Iteration (ADI)
-
-Compatible con PufferLib v3.0
-
-Curriculum Learning:
-1. Empezar con cubos mezclados con 1 movimiento
-2. Cuando success_rate > threshold, aumentar dificultad
-3. Progresar hasta scramble_moves = 20 (God's number)
+Caracteristicas:
+- Backend C de alto rendimiento (~5M+ steps/segundo)
+- ResNet como policy network (recomendado para puzzles)
+- PPO (Proximal Policy Optimization)
+- Curriculum Learning (ADI - Autodidactic Iteration)
 
 Uso:
-    python train.py
-    python train.py --max-scramble 10 --success-threshold 0.8
-    python train.py --use-pufferlib  # Usar PufferLib v3.0
+    python train.py                          # Entrenar con defaults
+    python train.py --num-envs 256           # Mas entornos paralelos
+    python train.py --max-scramble 5         # Limitar dificultad
+    python train.py --device cuda            # Usar GPU
 """
 
 import argparse
@@ -24,466 +20,575 @@ import time
 from collections import deque
 import numpy as np
 
-# Verificar disponibilidad de PufferLib v3.0
-PUFFER_AVAILABLE = False
-PUFFER_VERSION = None
+# ============================================================================
+# Importar backend C (rapido) o Python (lento) como fallback
+# ============================================================================
 
+C_BACKEND = False
 try:
-    import pufferlib
-    import pufferlib.vector
-    import pufferlib.emulation
-    PUFFER_AVAILABLE = True
-    PUFFER_VERSION = getattr(pufferlib, '__version__', 'unknown')
-    print(f"PufferLib v{PUFFER_VERSION} detectado")
+    from rubik_env_c import RubiksCubeBatchEnvC as RubiksCubeEnv
+    C_BACKEND = True
+    print(">>> USANDO BACKEND C (OPTIMIZADO) <<<")
 except ImportError:
-    print("PufferLib no esta instalado. Usando entrenamiento simple.")
+    from rubik_env import RubiksCubeEnv
+    print(">>> USANDO BACKEND PYTHON (LENTO) <<<")
+    print(">>> Ejecuta: python setup.py build_ext --inplace <<<")
 
-# Verificar PyTorch
+# ============================================================================
+# PyTorch
+# ============================================================================
+
 try:
     import torch
     import torch.nn as nn
+    import torch.nn.functional as F
     import torch.optim as optim
     from torch.distributions import Categorical
     TORCH_AVAILABLE = True
 except ImportError:
     TORCH_AVAILABLE = False
-    print("PyTorch no disponible. Solo entrenamiento aleatorio.")
+    print("ERROR: PyTorch es requerido para entrenar.")
+    print("Instala con: pip install torch")
+    exit(1)
 
-from rubik_env import RubiksCubeEnv, make_env
+
+# ============================================================================
+# ResNet Policy Network
+# ============================================================================
+
+class ResidualBlock(nn.Module):
+    """Bloque residual con skip connection."""
+
+    def __init__(self, hidden_size):
+        super().__init__()
+        self.fc1 = nn.Linear(hidden_size, hidden_size)
+        self.fc2 = nn.Linear(hidden_size, hidden_size)
+        self.ln1 = nn.LayerNorm(hidden_size)
+        self.ln2 = nn.LayerNorm(hidden_size)
+
+    def forward(self, x):
+        residual = x
+        x = F.relu(self.ln1(self.fc1(x)))
+        x = self.ln2(self.fc2(x))
+        x = F.relu(x + residual)  # Skip connection
+        return x
 
 
-class CurriculumTrainer:
+class ResNetPolicy(nn.Module):
     """
-    Entrenador con Curriculum Learning para el Cubo de Rubik.
+    ResNet Policy para el Cubo de Rubik.
 
-    Implementa Autodidactic Iteration (ADI):
-    - Empieza con problemas faciles (1 scramble move)
-    - Aumenta dificultad cuando el agente domina el nivel actual
+    Arquitectura basada en DeepCubeA:
+    - Input: One-hot encoding (324 = 54 stickers * 6 colores)
+    - Varios bloques residuales
+    - Separate heads para actor (policy) y critic (value)
     """
 
     def __init__(
         self,
-        env: RubiksCubeEnv,
+        obs_size: int = 324,
+        action_size: int = 12,
+        hidden_size: int = 512,
+        num_residual_blocks: int = 4,
+    ):
+        super().__init__()
+
+        self.obs_size = obs_size
+        self.action_size = action_size
+
+        # Input projection
+        self.input_fc = nn.Linear(obs_size, hidden_size)
+        self.input_ln = nn.LayerNorm(hidden_size)
+
+        # Residual blocks
+        self.residual_blocks = nn.ModuleList([
+            ResidualBlock(hidden_size) for _ in range(num_residual_blocks)
+        ])
+
+        # Actor head (policy)
+        self.actor_fc = nn.Linear(hidden_size, hidden_size // 2)
+        self.actor_out = nn.Linear(hidden_size // 2, action_size)
+
+        # Critic head (value)
+        self.critic_fc = nn.Linear(hidden_size, hidden_size // 2)
+        self.critic_out = nn.Linear(hidden_size // 2, 1)
+
+        # Initialize weights
+        self._init_weights()
+
+    def _init_weights(self):
+        """Inicializacion ortogonal (mejor para RL)."""
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.orthogonal_(module.weight, gain=np.sqrt(2))
+                nn.init.zeros_(module.bias)
+
+        # Escalar output layers
+        nn.init.orthogonal_(self.actor_out.weight, gain=0.01)
+        nn.init.orthogonal_(self.critic_out.weight, gain=1.0)
+
+    def forward(self, x):
+        """Forward pass completo."""
+        # Input projection
+        x = F.relu(self.input_ln(self.input_fc(x)))
+
+        # Residual blocks
+        for block in self.residual_blocks:
+            x = block(x)
+
+        # Actor (policy logits)
+        actor = F.relu(self.actor_fc(x))
+        logits = self.actor_out(actor)
+
+        # Critic (value)
+        critic = F.relu(self.critic_fc(x))
+        value = self.critic_out(critic)
+
+        return logits, value.squeeze(-1)
+
+    def get_action_and_value(self, obs, action=None, deterministic=False):
+        """
+        Obtiene accion, log_prob, entropia y valor.
+
+        Args:
+            obs: Observaciones [batch, obs_size]
+            action: Acciones previas (para calcular log_prob)
+            deterministic: Si True, toma la accion greedy
+
+        Returns:
+            action, log_prob, entropy, value
+        """
+        logits, value = self.forward(obs)
+        dist = Categorical(logits=logits)
+
+        if action is None:
+            if deterministic:
+                action = logits.argmax(dim=-1)
+            else:
+                action = dist.sample()
+
+        log_prob = dist.log_prob(action)
+        entropy = dist.entropy()
+
+        return action, log_prob, entropy, value
+
+    def get_value(self, obs):
+        """Solo obtiene el valor (para GAE)."""
+        _, value = self.forward(obs)
+        return value
+
+
+# ============================================================================
+# PPO Trainer
+# ============================================================================
+
+class PPOTrainer:
+    """
+    Proximal Policy Optimization con Curriculum Learning.
+    """
+
+    def __init__(
+        self,
+        env,
+        policy: ResNetPolicy,
+        device: str = 'cpu',
+        # PPO hyperparameters
+        learning_rate: float = 3e-4,
+        gamma: float = 0.99,
+        gae_lambda: float = 0.95,
+        clip_coef: float = 0.2,
+        ent_coef: float = 0.01,
+        vf_coef: float = 0.5,
+        max_grad_norm: float = 0.5,
+        # Training settings
+        num_steps: int = 128,
+        num_minibatches: int = 4,
+        update_epochs: int = 4,
+        # Curriculum
         start_scramble: int = 1,
         max_scramble: int = 20,
         success_threshold: float = 0.8,
-        eval_window: int = 100,
-        steps_per_level: int = 50000,
+        curriculum_window: int = 100,
+        min_steps_per_level: int = 50000,
     ):
         self.env = env
+        self.policy = policy.to(device)
+        self.device = device
+        self.num_envs = env.num_envs
+
+        # PPO hyperparameters
+        self.gamma = gamma
+        self.gae_lambda = gae_lambda
+        self.clip_coef = clip_coef
+        self.ent_coef = ent_coef
+        self.vf_coef = vf_coef
+        self.max_grad_norm = max_grad_norm
+        self.num_steps = num_steps
+        self.num_minibatches = num_minibatches
+        self.update_epochs = update_epochs
+
+        # Optimizer
+        self.optimizer = optim.Adam(policy.parameters(), lr=learning_rate, eps=1e-5)
+
+        # Curriculum learning
         self.current_scramble = start_scramble
         self.max_scramble = max_scramble
         self.success_threshold = success_threshold
-        self.eval_window = eval_window
-        self.steps_per_level = steps_per_level
-
-        # Tracking
-        self.recent_solves = deque(maxlen=eval_window)
-        self.total_steps = 0
+        self.curriculum_window = curriculum_window
+        self.min_steps_per_level = min_steps_per_level
+        self.recent_solves = deque(maxlen=curriculum_window)
         self.steps_at_level = 0
-        self.level_history = []
 
-        # Inicializar entorno
-        self.env.scramble_moves = start_scramble
+        # Batch size
+        self.batch_size = self.num_envs * self.num_steps
+        self.minibatch_size = self.batch_size // self.num_minibatches
 
-    def get_success_rate(self) -> float:
+        # Rollout buffers
+        self.obs_buffer = torch.zeros((num_steps, self.num_envs, 324), device=device)
+        self.actions_buffer = torch.zeros((num_steps, self.num_envs), dtype=torch.long, device=device)
+        self.logprobs_buffer = torch.zeros((num_steps, self.num_envs), device=device)
+        self.rewards_buffer = torch.zeros((num_steps, self.num_envs), device=device)
+        self.dones_buffer = torch.zeros((num_steps, self.num_envs), device=device)
+        self.values_buffer = torch.zeros((num_steps, self.num_envs), device=device)
+
+        # Statistics
+        self.global_step = 0
+        self.episode_returns = []
+        self.episode_lengths = []
+        self.solve_count = 0
+        self.episode_count = 0
+
+    def get_success_rate(self):
         if len(self.recent_solves) == 0:
             return 0.0
         return sum(self.recent_solves) / len(self.recent_solves)
 
-    def should_increase_difficulty(self) -> bool:
+    def should_increase_difficulty(self):
         if self.current_scramble >= self.max_scramble:
             return False
-        if self.steps_at_level < self.steps_per_level:
+        if self.steps_at_level < self.min_steps_per_level:
             return False
-        if len(self.recent_solves) < self.eval_window:
+        if len(self.recent_solves) < self.curriculum_window:
             return False
         return self.get_success_rate() >= self.success_threshold
 
     def increase_difficulty(self):
         self.current_scramble += 1
         self.env.scramble_moves = self.current_scramble
-        self.env.reset_stats()
         self.recent_solves.clear()
         self.steps_at_level = 0
-        self.level_history.append({
-            'scramble': self.current_scramble,
-            'total_steps': self.total_steps,
-        })
         print(f"\n{'='*50}")
-        print(f"CURRICULUM: Aumentando dificultad a {self.current_scramble} scramble moves")
+        print(f"CURRICULUM: Nivel {self.current_scramble} scramble moves")
         print(f"{'='*50}\n")
 
-    def record_episode(self, solved: bool):
-        self.recent_solves.append(1 if solved else 0)
+    def collect_rollout(self):
+        """Recolecta un rollout de experiencias."""
+        obs, _ = self.env.reset()
+        obs = torch.FloatTensor(obs).to(self.device)
 
-    def step(self, num_steps: int = 1):
-        self.total_steps += num_steps
-        self.steps_at_level += num_steps
-
-
-# ============================================================================
-# Simple Policy Network (para usar sin PufferLib)
-# ============================================================================
-
-if TORCH_AVAILABLE:
-    class SimplePolicy(nn.Module):
-        """Red neuronal simple para el cubo de Rubik."""
-
-        def __init__(self, obs_size=324, action_size=12, hidden_size=256):
-            super().__init__()
-            self.network = nn.Sequential(
-                nn.Linear(obs_size, hidden_size),
-                nn.ReLU(),
-                nn.Linear(hidden_size, hidden_size),
-                nn.ReLU(),
-            )
-            self.actor = nn.Linear(hidden_size, action_size)
-            self.critic = nn.Linear(hidden_size, 1)
-
-        def forward(self, x):
-            hidden = self.network(x)
-            return self.actor(hidden), self.critic(hidden)
-
-        def get_action(self, obs, deterministic=False):
+        for step in range(self.num_steps):
             with torch.no_grad():
-                logits, value = self.forward(obs)
-                if deterministic:
-                    action = logits.argmax(dim=-1)
-                else:
-                    dist = Categorical(logits=logits)
-                    action = dist.sample()
-                return action, value
+                action, logprob, _, value = self.policy.get_action_and_value(obs)
 
+            # Store
+            self.obs_buffer[step] = obs
+            self.actions_buffer[step] = action
+            self.logprobs_buffer[step] = logprob
+            self.values_buffer[step] = value
 
-# ============================================================================
-# Entrenamiento sin PufferLib (con curriculum)
-# ============================================================================
+            # Step environment
+            next_obs, rewards, terminals, truncations, infos = self.env.step(
+                action.cpu().numpy()
+            )
 
-def train_with_curriculum(args):
-    """Entrenamiento con curriculum learning (sin PufferLib)."""
-    print("\n" + "="*60)
-    print("ENTRENAMIENTO CON CURRICULUM LEARNING")
-    print("="*60)
-    print(f"  Start scramble: {args.start_scramble}")
-    print(f"  Max scramble: {args.max_scramble}")
-    print(f"  Success threshold: {args.success_threshold:.0%}")
-    print(f"  Reward mode: {args.reward_mode}")
-    print(f"  Total timesteps: {args.total_timesteps:,}")
-    print(f"  PyTorch: {'Disponible' if TORCH_AVAILABLE else 'No disponible'}")
-    print("="*60 + "\n")
+            dones = np.logical_or(terminals, truncations)
 
-    # Crear entorno
-    env = RubiksCubeEnv(
-        num_envs=args.num_envs,
-        scramble_moves=args.start_scramble,
-        max_steps=args.max_steps,
-        reward_mode=args.reward_mode,
-        solve_reward=args.solve_reward,
-        step_penalty=args.step_penalty,
-    )
+            self.rewards_buffer[step] = torch.FloatTensor(rewards).to(self.device)
+            self.dones_buffer[step] = torch.FloatTensor(dones).to(self.device)
 
-    # Crear curriculum trainer
-    curriculum = CurriculumTrainer(
-        env=env,
-        start_scramble=args.start_scramble,
-        max_scramble=args.max_scramble,
-        success_threshold=args.success_threshold,
-        eval_window=args.eval_window,
-        steps_per_level=args.steps_per_level,
-    )
+            # Track episodes
+            for i, done in enumerate(dones):
+                if done:
+                    solved = terminals[i]
+                    self.recent_solves.append(1 if solved else 0)
+                    self.episode_count += 1
+                    if solved:
+                        self.solve_count += 1
 
-    # Crear policy si PyTorch está disponible
-    policy = None
-    optimizer = None
-    device = 'cpu'
+            obs = torch.FloatTensor(next_obs).to(self.device)
 
-    if TORCH_AVAILABLE and not args.random_policy:
-        device = 'cuda' if torch.cuda.is_available() and args.device == 'cuda' else 'cpu'
-        policy = SimplePolicy().to(device)
-        optimizer = optim.Adam(policy.parameters(), lr=args.learning_rate)
-        print(f"Usando policy network en {device}")
-    else:
-        print("Usando acciones aleatorias (sin policy network)")
+        # Compute returns with GAE
+        with torch.no_grad():
+            next_value = self.policy.get_value(obs)
+            advantages = self._compute_gae(next_value)
+            returns = advantages + self.values_buffer
 
-    obs, _ = env.reset(seed=args.seed)
+        return advantages, returns
 
-    # Estadisticas
-    episode_rewards = []
-    episode_lengths = []
-    start_time = time.time()
-    last_log_time = start_time
+    def _compute_gae(self, next_value):
+        """Compute Generalized Advantage Estimation."""
+        advantages = torch.zeros_like(self.rewards_buffer)
+        last_gae = 0
 
-    print(f"Iniciando entrenamiento con {args.num_envs} entornos paralelos...")
-    print(f"Scramble inicial: {curriculum.current_scramble}\n")
+        for t in reversed(range(self.num_steps)):
+            if t == self.num_steps - 1:
+                next_non_terminal = 1.0 - self.dones_buffer[t]
+                next_values = next_value
+            else:
+                next_non_terminal = 1.0 - self.dones_buffer[t]
+                next_values = self.values_buffer[t + 1]
 
-    step = 0
-    while step < args.total_timesteps:
-        # Obtener acciones
-        if policy is not None:
-            obs_tensor = torch.FloatTensor(obs).to(device)
-            actions, _ = policy.get_action(obs_tensor)
-            actions = actions.cpu().numpy()
-        else:
-            actions = np.random.randint(0, 12, size=args.num_envs)
+            delta = (self.rewards_buffer[t] +
+                     self.gamma * next_values * next_non_terminal -
+                     self.values_buffer[t])
+            advantages[t] = last_gae = (delta +
+                                        self.gamma * self.gae_lambda *
+                                        next_non_terminal * last_gae)
 
-        obs, rewards, terminals, truncations, infos = env.step(actions)
-        step += args.num_envs
-        curriculum.step(args.num_envs)
+        return advantages
 
-        # Registrar episodios completados
-        for i in range(args.num_envs):
-            if terminals[i] or truncations[i]:
-                solved = terminals[i]
-                curriculum.record_episode(solved)
-                if f'episode_return_{i}' in infos:
-                    episode_rewards.append(infos[f'episode_return_{i}'])
-                    episode_lengths.append(infos[f'episode_length_{i}'])
+    def update(self, advantages, returns):
+        """PPO update step."""
+        # Flatten batches
+        b_obs = self.obs_buffer.reshape(-1, 324)
+        b_actions = self.actions_buffer.reshape(-1)
+        b_logprobs = self.logprobs_buffer.reshape(-1)
+        b_advantages = advantages.reshape(-1)
+        b_returns = returns.reshape(-1)
+        b_values = self.values_buffer.reshape(-1)
 
-        # Verificar si debemos aumentar dificultad
-        if curriculum.should_increase_difficulty():
-            curriculum.increase_difficulty()
-            obs, _ = env.reset()
+        # Normalize advantages
+        b_advantages = (b_advantages - b_advantages.mean()) / (b_advantages.std() + 1e-8)
 
-        # Logging
-        current_time = time.time()
-        if current_time - last_log_time >= args.log_interval:
-            elapsed = current_time - start_time
-            sps = step / elapsed
-            success_rate = curriculum.get_success_rate()
+        # PPO update epochs
+        clipfracs = []
+        for epoch in range(self.update_epochs):
+            # Shuffle indices
+            indices = torch.randperm(self.batch_size, device=self.device)
 
-            print(f"Step {step:,}/{args.total_timesteps:,} | "
-                  f"Scramble: {curriculum.current_scramble} | "
-                  f"Success: {success_rate:.1%} | "
-                  f"SPS: {sps:.0f}")
+            for start in range(0, self.batch_size, self.minibatch_size):
+                end = start + self.minibatch_size
+                mb_indices = indices[start:end]
 
-            if episode_rewards:
-                avg_reward = np.mean(episode_rewards[-100:])
-                avg_length = np.mean(episode_lengths[-100:])
-                print(f"  Avg reward: {avg_reward:.3f} | Avg length: {avg_length:.1f}")
-
-            last_log_time = current_time
-
-    # Resumen final
-    elapsed = time.time() - start_time
-    print("\n" + "="*60)
-    print("ENTRENAMIENTO COMPLETADO")
-    print("="*60)
-    print(f"  Total steps: {step:,}")
-    print(f"  Tiempo: {elapsed:.1f}s")
-    print(f"  SPS promedio: {step/elapsed:.0f}")
-    print(f"  Scramble final: {curriculum.current_scramble}")
-    print(f"  Success rate final: {curriculum.get_success_rate():.1%}")
-
-    if curriculum.level_history:
-        print("\nProgresion del curriculum:")
-        for level in curriculum.level_history:
-            print(f"  Scramble {level['scramble']}: alcanzado en step {level['total_steps']:,}")
-
-    # Guardar modelo
-    if policy is not None and args.save_path:
-        torch.save(policy.state_dict(), args.save_path)
-        print(f"\nModelo guardado en {args.save_path}")
-
-    env.close()
-    return curriculum
-
-
-# ============================================================================
-# Entrenamiento con PufferLib v3.0
-# ============================================================================
-
-def train_with_pufferlib_v3(args):
-    """Entrenamiento con PufferLib v3.0 API."""
-    if not PUFFER_AVAILABLE:
-        raise ImportError("PufferLib v3.0 es requerido")
-
-    print("\n" + "="*60)
-    print(f"ENTRENAMIENTO CON PUFFERLIB v{PUFFER_VERSION}")
-    print("="*60)
-
-    try:
-        # Importar modulos de PufferLib v3.0
-        import pufferlib.pufferl as pufferl
-
-        current_scramble = args.start_scramble
-        total_steps = 0
-
-        while current_scramble <= args.max_scramble and total_steps < args.total_timesteps:
-            print(f"\n--- Nivel {current_scramble}: scramble_moves = {current_scramble} ---")
-
-            # Crear entorno
-            def env_creator():
-                return RubiksCubeEnv(
-                    num_envs=1,
-                    scramble_moves=current_scramble,
-                    max_steps=args.max_steps,
-                    reward_mode=args.reward_mode,
-                    solve_reward=args.solve_reward,
-                    step_penalty=args.step_penalty,
+                _, new_logprob, entropy, new_value = self.policy.get_action_and_value(
+                    b_obs[mb_indices], b_actions[mb_indices]
                 )
 
-            # Crear vectorized environment
-            vecenv = pufferlib.vector.make(
-                env_creator,
-                num_envs=args.num_envs,
-                num_workers=args.num_workers,
-            )
+                # Policy loss
+                logratio = new_logprob - b_logprobs[mb_indices]
+                ratio = logratio.exp()
 
-            # Crear policy
-            policy = SimplePolicy()
-            if args.device == 'cuda' and torch.cuda.is_available():
-                policy = policy.cuda()
+                with torch.no_grad():
+                    clipfracs.append(((ratio - 1.0).abs() > self.clip_coef).float().mean().item())
 
-            # Configurar PuffeRL
-            level_steps = min(args.steps_per_level, args.total_timesteps - total_steps)
+                mb_advantages = b_advantages[mb_indices]
+                pg_loss1 = -mb_advantages * ratio
+                pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - self.clip_coef, 1 + self.clip_coef)
+                pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
-            # Crear trainer usando la API de v3.0
-            trainer = pufferl.PuffeRL(
-                config={
-                    'total_timesteps': level_steps,
-                    'learning_rate': args.learning_rate,
-                    'gamma': args.gamma,
-                    'gae_lambda': args.gae_lambda,
-                    'update_epochs': args.update_epochs,
-                    'clip_coef': args.clip_coef,
-                    'vf_coef': args.vf_coef,
-                    'ent_coef': args.ent_coef,
-                    'batch_size': args.batch_size,
-                },
-                vecenv=vecenv,
-                policy=policy,
-            )
+                # Value loss
+                v_loss = 0.5 * ((new_value - b_returns[mb_indices]) ** 2).mean()
 
-            # Training loop
-            while trainer.global_step < level_steps:
-                trainer.evaluate()
-                trainer.train()
+                # Entropy loss
+                entropy_loss = entropy.mean()
 
-            total_steps += level_steps
-            trainer.close()
-            vecenv.close()
+                # Total loss
+                loss = pg_loss - self.ent_coef * entropy_loss + self.vf_coef * v_loss
 
-            current_scramble += 1
-            print(f"Avanzando a scramble_moves = {current_scramble}")
+                # Optimize
+                self.optimizer.zero_grad()
+                loss.backward()
+                nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
+                self.optimizer.step()
 
-        print("\nEntrenamiento con PufferLib completado!")
+        return {
+            'pg_loss': pg_loss.item(),
+            'v_loss': v_loss.item(),
+            'entropy': entropy_loss.item(),
+            'clipfrac': np.mean(clipfracs),
+        }
 
-    except AttributeError as e:
-        print(f"Error de API: {e}")
-        print("Intentando con API alternativa...")
-        train_with_pufferlib_fallback(args)
+    def train(self, total_timesteps: int, log_interval: int = 10):
+        """Loop de entrenamiento principal."""
+        print(f"\n{'='*60}")
+        print("INICIANDO ENTRENAMIENTO")
+        print(f"{'='*60}")
+        print(f"  Backend: {'C (optimizado)' if C_BACKEND else 'Python (lento)'}")
+        print(f"  Device: {self.device}")
+        print(f"  Num envs: {self.num_envs}")
+        print(f"  Batch size: {self.batch_size}")
+        print(f"  Total timesteps: {total_timesteps:,}")
+        print(f"  Scramble inicial: {self.current_scramble}")
+        print(f"{'='*60}\n")
+
+        # Set initial scramble
+        self.env.scramble_moves = self.current_scramble
+
+        num_updates = total_timesteps // self.batch_size
+        start_time = time.time()
+
+        for update in range(1, num_updates + 1):
+            # Collect rollout
+            advantages, returns = self.collect_rollout()
+
+            # PPO update
+            losses = self.update(advantages, returns)
+
+            # Update stats
+            self.global_step += self.batch_size
+            self.steps_at_level += self.batch_size
+
+            # Check curriculum
+            if self.should_increase_difficulty():
+                self.increase_difficulty()
+
+            # Logging
+            if update % log_interval == 0:
+                elapsed = time.time() - start_time
+                sps = self.global_step / elapsed
+                success_rate = self.get_success_rate()
+
+                print(f"Update {update}/{num_updates} | "
+                      f"Step {self.global_step:,} | "
+                      f"Scramble {self.current_scramble} | "
+                      f"Success {success_rate:.1%} | "
+                      f"SPS {sps:,.0f}")
+                print(f"  pg_loss={losses['pg_loss']:.4f} "
+                      f"v_loss={losses['v_loss']:.4f} "
+                      f"entropy={losses['entropy']:.4f} "
+                      f"clipfrac={losses['clipfrac']:.3f}")
+
+        # Final stats
+        elapsed = time.time() - start_time
+        print(f"\n{'='*60}")
+        print("ENTRENAMIENTO COMPLETADO")
+        print(f"{'='*60}")
+        print(f"  Total steps: {self.global_step:,}")
+        print(f"  Tiempo: {elapsed:.1f}s")
+        print(f"  SPS promedio: {self.global_step/elapsed:,.0f}")
+        print(f"  Scramble final: {self.current_scramble}")
+        print(f"  Success rate: {self.get_success_rate():.1%}")
+        print(f"  Episodes: {self.episode_count:,}")
+        print(f"  Solves: {self.solve_count:,}")
 
 
-def train_with_pufferlib_fallback(args):
-    """Fallback para diferentes versiones de PufferLib."""
-    print("Usando metodo de entrenamiento alternativo...")
-
-    # Intentar diferentes APIs
-    try:
-        # Metodo 1: pufferlib.pufferl.train()
-        import pufferlib.pufferl as pufferl
-        if hasattr(pufferl, 'train'):
-            print("Usando pufferl.train()")
-            # Esto requeriria configuracion especifica del entorno
-            raise NotImplementedError("Necesita configuracion de environment registry")
-    except (ImportError, NotImplementedError):
-        pass
-
-    try:
-        # Metodo 2: API legacy
-        import pufferlib.frameworks.cleanrl as cleanrl
-        if hasattr(cleanrl, 'PPO'):
-            print("Usando pufferlib.frameworks.cleanrl (legacy)")
-            # Usar API legacy
-            raise NotImplementedError("API legacy no disponible en v3.0")
-    except (ImportError, NotImplementedError, AttributeError):
-        pass
-
-    # Si nada funciona, usar entrenamiento simple
-    print("Usando entrenamiento sin PufferLib...")
-    train_with_curriculum(args)
-
+# ============================================================================
+# Main
+# ============================================================================
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Entrenar RL para Cubo de Rubik con Curriculum Learning"
-    )
+    parser = argparse.ArgumentParser(description="Entrenar Cubo de Rubik con ResNet + PPO")
 
-    # Parametros del curriculum
-    parser.add_argument("--start-scramble", type=int, default=1,
-                        help="Scramble moves inicial (default: 1)")
-    parser.add_argument("--max-scramble", type=int, default=20,
-                        help="Scramble moves maximo (God's number = 20)")
-    parser.add_argument("--success-threshold", type=float, default=0.8,
-                        help="Tasa de exito para avanzar nivel (default: 0.8)")
-    parser.add_argument("--eval-window", type=int, default=100,
-                        help="Ventana de episodios para evaluar (default: 100)")
-    parser.add_argument("--steps-per-level", type=int, default=50000,
-                        help="Minimo de pasos por nivel (default: 50000)")
-
-    # Parametros del entorno
-    parser.add_argument("--max-steps", type=int, default=50,
-                        help="Maximo de pasos por episodio")
-    parser.add_argument("--reward-mode", type=str, default='sparse',
-                        choices=['sparse', 'dense'],
-                        help="Modo de recompensa (default: sparse)")
-    parser.add_argument("--solve-reward", type=float, default=1.0,
-                        help="Recompensa por resolver")
-    parser.add_argument("--step-penalty", type=float, default=0.01,
-                        help="Penalizacion por paso")
-
-    # Parametros de entrenamiento
-    parser.add_argument("--total-timesteps", type=int, default=1_000_000,
-                        help="Total de pasos de entrenamiento")
-    parser.add_argument("--learning-rate", type=float, default=3e-4,
-                        help="Tasa de aprendizaje")
-    parser.add_argument("--gamma", type=float, default=0.99,
-                        help="Factor de descuento")
-    parser.add_argument("--gae-lambda", type=float, default=0.95,
-                        help="Lambda para GAE")
-    parser.add_argument("--update-epochs", type=int, default=4,
-                        help="Epocas de actualizacion")
-    parser.add_argument("--clip-coef", type=float, default=0.2,
-                        help="Coeficiente de clipping PPO")
-    parser.add_argument("--vf-coef", type=float, default=0.5,
-                        help="Coeficiente de value function")
-    parser.add_argument("--ent-coef", type=float, default=0.01,
-                        help="Coeficiente de entropia")
-    parser.add_argument("--max-grad-norm", type=float, default=0.5,
-                        help="Maximo gradiente")
-    parser.add_argument("--batch-size", type=int, default=2048,
-                        help="Tamano del batch")
-    parser.add_argument("--minibatch-size", type=int, default=512,
-                        help="Tamano del minibatch")
-
-    # Parametros de vectorizacion
-    parser.add_argument("--num-envs", type=int, default=64,
+    # Environment
+    parser.add_argument("--num-envs", type=int, default=256,
                         help="Numero de entornos paralelos")
-    parser.add_argument("--num-workers", type=int, default=2,
-                        help="Numero de workers")
+    parser.add_argument("--max-steps", type=int, default=50,
+                        help="Max steps por episodio")
 
-    # Otros
-    parser.add_argument("--save-path", type=str, default="rubik_model.pt",
-                        help="Ruta para guardar modelo")
+    # Curriculum
+    parser.add_argument("--start-scramble", type=int, default=1,
+                        help="Scramble inicial")
+    parser.add_argument("--max-scramble", type=int, default=20,
+                        help="Scramble maximo")
+    parser.add_argument("--success-threshold", type=float, default=0.8,
+                        help="Tasa de exito para avanzar")
+
+    # Training
+    parser.add_argument("--total-timesteps", type=int, default=10_000_000,
+                        help="Total de timesteps")
+    parser.add_argument("--learning-rate", type=float, default=3e-4,
+                        help="Learning rate")
+    parser.add_argument("--num-steps", type=int, default=128,
+                        help="Steps por rollout")
+    parser.add_argument("--num-minibatches", type=int, default=4,
+                        help="Numero de minibatches")
+    parser.add_argument("--update-epochs", type=int, default=4,
+                        help="Epochs por update")
+
+    # Network
+    parser.add_argument("--hidden-size", type=int, default=512,
+                        help="Tamano de capas ocultas")
+    parser.add_argument("--num-blocks", type=int, default=4,
+                        help="Numero de bloques residuales")
+
+    # Other
+    parser.add_argument("--device", type=str, default="cpu",
+                        choices=["cpu", "cuda"],
+                        help="Device")
     parser.add_argument("--seed", type=int, default=42,
-                        help="Seed para reproducibilidad")
-    parser.add_argument("--log-interval", type=float, default=5.0,
-                        help="Intervalo de logging en segundos")
-    parser.add_argument("--use-pufferlib", action="store_true",
-                        help="Usar PufferLib para entrenamiento")
-    parser.add_argument("--device", type=str, default='cpu',
-                        choices=['cpu', 'cuda'],
-                        help="Dispositivo para entrenamiento")
-    parser.add_argument("--random-policy", action="store_true",
-                        help="Usar acciones aleatorias (sin red neuronal)")
+                        help="Random seed")
+    parser.add_argument("--save-path", type=str, default="rubik_resnet.pt",
+                        help="Path para guardar modelo")
+    parser.add_argument("--log-interval", type=int, default=10,
+                        help="Intervalo de logging")
 
     args = parser.parse_args()
 
-    if args.use_pufferlib and PUFFER_AVAILABLE:
-        train_with_pufferlib_v3(args)
+    # Set seeds
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+
+    # Check CUDA
+    if args.device == "cuda" and not torch.cuda.is_available():
+        print("CUDA no disponible, usando CPU")
+        args.device = "cpu"
+
+    # Create environment
+    if C_BACKEND:
+        env = RubiksCubeEnv(
+            num_envs=args.num_envs,
+            scramble_moves=args.start_scramble,
+            max_steps=args.max_steps,
+            reward_mode='sparse',
+        )
     else:
-        train_with_curriculum(args)
+        env = RubiksCubeEnv(
+            num_envs=args.num_envs,
+            scramble_moves=args.start_scramble,
+            max_steps=args.max_steps,
+            reward_mode='sparse',
+        )
+
+    # Create policy
+    policy = ResNetPolicy(
+        obs_size=324,
+        action_size=12,
+        hidden_size=args.hidden_size,
+        num_residual_blocks=args.num_blocks,
+    )
+
+    print(f"\nResNet Policy:")
+    print(f"  Hidden size: {args.hidden_size}")
+    print(f"  Residual blocks: {args.num_blocks}")
+    print(f"  Parameters: {sum(p.numel() for p in policy.parameters()):,}")
+
+    # Create trainer
+    trainer = PPOTrainer(
+        env=env,
+        policy=policy,
+        device=args.device,
+        learning_rate=args.learning_rate,
+        num_steps=args.num_steps,
+        num_minibatches=args.num_minibatches,
+        update_epochs=args.update_epochs,
+        start_scramble=args.start_scramble,
+        max_scramble=args.max_scramble,
+        success_threshold=args.success_threshold,
+    )
+
+    # Train
+    trainer.train(
+        total_timesteps=args.total_timesteps,
+        log_interval=args.log_interval,
+    )
+
+    # Save model
+    torch.save({
+        'policy_state_dict': policy.state_dict(),
+        'scramble_level': trainer.current_scramble,
+        'args': vars(args),
+    }, args.save_path)
+    print(f"\nModelo guardado en {args.save_path}")
 
 
 if __name__ == "__main__":
