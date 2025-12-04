@@ -358,6 +358,237 @@ static PyTypeObject RubikBatchEnvType = {
 };
 
 // ============================================================================
+// PufferLib-native vectorized environment (zero-copy buffers)
+// ============================================================================
+
+// Opaque handle for vectorized environments
+typedef struct {
+    RubikBatchEnv batch;
+    int log_interval;
+    int tick;
+    // Stats for logging
+    int* episode_lengths;
+    float* episode_returns;
+    int* solve_counts;
+} VecEnvHandle;
+
+// vec_init: Initialize vectorized environment with external buffers
+// This follows the PufferLib Ocean pattern for high performance
+static PyObject* rubik_vec_init(PyObject* self, PyObject* args, PyObject* kwds) {
+    static char* kwlist[] = {"observations", "actions", "rewards", "terminals",
+                             "truncations", "num_envs", "seed",
+                             "scramble_moves", "max_steps", "solve_reward",
+                             "step_penalty", "reward_mode", "log_interval", NULL};
+
+    PyArrayObject* obs_array;
+    PyArrayObject* actions_array;
+    PyArrayObject* rewards_array;
+    PyArrayObject* terminals_array;
+    PyArrayObject* truncations_array;
+    int num_envs;
+    int seed = 0;
+    int scramble_moves = 1;
+    int max_steps = 50;
+    float solve_reward = 1.0f;
+    float step_penalty = 0.01f;
+    int reward_mode = 0;
+    int log_interval = 128;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O!O!O!O!O!ii|iiffii", kwlist,
+            &PyArray_Type, &obs_array,
+            &PyArray_Type, &actions_array,
+            &PyArray_Type, &rewards_array,
+            &PyArray_Type, &terminals_array,
+            &PyArray_Type, &truncations_array,
+            &num_envs, &seed,
+            &scramble_moves, &max_steps, &solve_reward,
+            &step_penalty, &reward_mode, &log_interval)) {
+        return NULL;
+    }
+
+    // Allocate handle
+    VecEnvHandle* handle = (VecEnvHandle*)malloc(sizeof(VecEnvHandle));
+    if (!handle) {
+        PyErr_SetString(PyExc_MemoryError, "Failed to allocate VecEnvHandle");
+        return NULL;
+    }
+
+    // Initialize batch environment
+    batch_env_init(&handle->batch, num_envs, scramble_moves, max_steps,
+                   solve_reward, step_penalty, reward_mode, (uint64_t)seed);
+
+    handle->log_interval = log_interval;
+    handle->tick = 0;
+
+    // Allocate stats arrays
+    handle->episode_lengths = (int*)calloc(num_envs, sizeof(int));
+    handle->episode_returns = (float*)calloc(num_envs, sizeof(float));
+    handle->solve_counts = (int*)calloc(num_envs, sizeof(int));
+
+    // Set buffer pointers directly from Python arrays (zero-copy!)
+    batch_env_set_buffers(&handle->batch,
+        (float*)PyArray_DATA(obs_array),
+        (float*)PyArray_DATA(rewards_array),
+        (uint8_t*)PyArray_DATA(terminals_array),
+        (uint8_t*)PyArray_DATA(truncations_array));
+
+    // Store actions pointer in batch for later use
+    // (actions are read, not written, so we store separately)
+    handle->batch.envs[0].observations = (float*)PyArray_DATA(obs_array);
+
+    return PyLong_FromVoidPtr(handle);
+}
+
+// vec_reset: Reset all environments
+static PyObject* rubik_vec_reset(PyObject* self, PyObject* args) {
+    PyObject* handle_obj;
+    int seed = 0;
+
+    if (!PyArg_ParseTuple(args, "O|i", &handle_obj, &seed)) {
+        return NULL;
+    }
+
+    VecEnvHandle* handle = (VecEnvHandle*)PyLong_AsVoidPtr(handle_obj);
+
+    // Update seeds if provided
+    if (seed != 0) {
+        for (int i = 0; i < handle->batch.num_envs; i++) {
+            handle->batch.envs[i].rng_state = (uint64_t)(seed + i);
+        }
+    }
+
+    batch_env_reset(&handle->batch);
+    handle->tick = 0;
+
+    // Reset stats
+    memset(handle->episode_lengths, 0, handle->batch.num_envs * sizeof(int));
+    memset(handle->episode_returns, 0, handle->batch.num_envs * sizeof(float));
+    memset(handle->solve_counts, 0, handle->batch.num_envs * sizeof(int));
+
+    Py_RETURN_NONE;
+}
+
+// vec_step: Step all environments (reads actions from buffer, writes to obs/rewards/etc)
+static PyObject* rubik_vec_step(PyObject* self, PyObject* args) {
+    PyObject* handle_obj;
+    PyArrayObject* actions_array;
+
+    if (!PyArg_ParseTuple(args, "OO!", &handle_obj, &PyArray_Type, &actions_array)) {
+        return NULL;
+    }
+
+    VecEnvHandle* handle = (VecEnvHandle*)PyLong_AsVoidPtr(handle_obj);
+    int* actions = (int*)PyArray_DATA(actions_array);
+
+    // Track stats before step
+    for (int i = 0; i < handle->batch.num_envs; i++) {
+        handle->episode_lengths[i]++;
+    }
+
+    // Step all environments
+    batch_env_step(&handle->batch, actions);
+    handle->tick++;
+
+    // Track stats after step
+    for (int i = 0; i < handle->batch.num_envs; i++) {
+        handle->episode_returns[i] += handle->batch.envs[i].rewards[0];
+
+        // If episode ended, track solve and reset stats
+        if (handle->batch.envs[i].terminals[0]) {
+            handle->solve_counts[i]++;
+            handle->episode_lengths[i] = 0;
+            handle->episode_returns[i] = 0.0f;
+        } else if (handle->batch.envs[i].truncations[0]) {
+            handle->episode_lengths[i] = 0;
+            handle->episode_returns[i] = 0.0f;
+        }
+    }
+
+    Py_RETURN_NONE;
+}
+
+// vec_log: Return logging info (called periodically)
+static PyObject* rubik_vec_log(PyObject* self, PyObject* args) {
+    PyObject* handle_obj;
+
+    if (!PyArg_ParseTuple(args, "O", &handle_obj)) {
+        return NULL;
+    }
+
+    VecEnvHandle* handle = (VecEnvHandle*)PyLong_AsVoidPtr(handle_obj);
+
+    // Calculate aggregate stats
+    int total_solves = 0;
+    for (int i = 0; i < handle->batch.num_envs; i++) {
+        total_solves += handle->solve_counts[i];
+    }
+
+    // Build info dict
+    PyObject* info = PyDict_New();
+    PyDict_SetItemString(info, "tick", PyLong_FromLong(handle->tick));
+    PyDict_SetItemString(info, "total_solves", PyLong_FromLong(total_solves));
+    PyDict_SetItemString(info, "scramble_moves", PyLong_FromLong(handle->batch.scramble_moves));
+
+    return info;
+}
+
+// vec_close: Free resources
+static PyObject* rubik_vec_close(PyObject* self, PyObject* args) {
+    PyObject* handle_obj;
+
+    if (!PyArg_ParseTuple(args, "O", &handle_obj)) {
+        return NULL;
+    }
+
+    VecEnvHandle* handle = (VecEnvHandle*)PyLong_AsVoidPtr(handle_obj);
+
+    if (handle) {
+        batch_env_free(&handle->batch);
+        free(handle->episode_lengths);
+        free(handle->episode_returns);
+        free(handle->solve_counts);
+        free(handle);
+    }
+
+    Py_RETURN_NONE;
+}
+
+// vec_set_scramble: Update scramble moves dynamically (for curriculum)
+static PyObject* rubik_vec_set_scramble(PyObject* self, PyObject* args) {
+    PyObject* handle_obj;
+    int scramble_moves;
+
+    if (!PyArg_ParseTuple(args, "Oi", &handle_obj, &scramble_moves)) {
+        return NULL;
+    }
+
+    VecEnvHandle* handle = (VecEnvHandle*)PyLong_AsVoidPtr(handle_obj);
+
+    // Clamp value
+    scramble_moves = scramble_moves > 0 ? (scramble_moves < 26 ? scramble_moves : 26) : 1;
+
+    handle->batch.scramble_moves = scramble_moves;
+    for (int i = 0; i < handle->batch.num_envs; i++) {
+        handle->batch.envs[i].scramble_moves = scramble_moves;
+    }
+
+    Py_RETURN_NONE;
+}
+
+// vec_render: Render a specific environment (placeholder)
+static PyObject* rubik_vec_render(PyObject* self, PyObject* args) {
+    PyObject* handle_obj;
+    int env_idx = 0;
+
+    if (!PyArg_ParseTuple(args, "O|i", &handle_obj, &env_idx)) {
+        return NULL;
+    }
+
+    // Placeholder - could print cube state
+    Py_RETURN_NONE;
+}
+
+// ============================================================================
 // Module definition
 // ============================================================================
 
@@ -374,6 +605,21 @@ static PyMethodDef rubik_c_methods[] = {
      "Get observation size (324)"},
     {"get_num_actions", rubik_c_get_num_actions, METH_NOARGS,
      "Get number of actions (12)"},
+    // PufferLib-native vectorized functions (zero-copy)
+    {"vec_init", (PyCFunction)rubik_vec_init, METH_VARARGS | METH_KEYWORDS,
+     "Initialize vectorized environment with external buffers"},
+    {"vec_reset", rubik_vec_reset, METH_VARARGS,
+     "Reset all environments"},
+    {"vec_step", rubik_vec_step, METH_VARARGS,
+     "Step all environments"},
+    {"vec_log", rubik_vec_log, METH_VARARGS,
+     "Get logging info"},
+    {"vec_close", rubik_vec_close, METH_VARARGS,
+     "Close and free resources"},
+    {"vec_set_scramble", rubik_vec_set_scramble, METH_VARARGS,
+     "Set scramble moves for curriculum learning"},
+    {"vec_render", rubik_vec_render, METH_VARARGS,
+     "Render an environment"},
     {NULL, NULL, 0, NULL}
 };
 
