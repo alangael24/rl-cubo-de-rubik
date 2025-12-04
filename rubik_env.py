@@ -20,9 +20,12 @@ from gymnasium import spaces
 
 try:
     import pufferlib
+    import pufferlib.emulation
     PUFFER_AVAILABLE = True
+    PUFFER_VERSION = getattr(pufferlib, '__version__', 'unknown')
 except ImportError:
     PUFFER_AVAILABLE = False
+    PUFFER_VERSION = None
 
 from rubik_cube import RubiksCube
 
@@ -242,127 +245,141 @@ class RubiksCubeEnv:
         print(self.cubes[env_idx])
 
 
-# Wrapper para compatibilidad con PufferLib
-if PUFFER_AVAILABLE:
-    class PufferRubiksCubeEnv(pufferlib.PufferEnv):
-        """
-        Entorno PufferLib para el Cubo de Rubik.
+# Gymnasium-compatible environment for PufferLib v3.0
+class GymnasiumRubiksCubeEnv(gym.Env):
+    """
+    Entorno Gymnasium para el Cubo de Rubik.
 
-        Este wrapper sigue la API de PufferLib para integracion
-        con el sistema de entrenamiento.
-        """
+    Compatible con PufferLib v3.0 via pufferlib.emulation.GymnasiumPufferEnv
+    """
 
-        def __init__(
-            self,
-            scramble_moves: int = 1,
-            max_steps: int = 50,
-            reward_mode: str = 'sparse',
-            solve_reward: float = 1.0,
-            step_penalty: float = 0.01,
-            buf=None,
-            **kwargs
-        ):
-            # Espacios
-            self.single_observation_space = spaces.Box(
-                low=0.0, high=1.0, shape=(324,), dtype=np.float32
-            )
-            self.single_action_space = spaces.Discrete(12)
+    metadata = {'render_modes': ['human']}
 
-            super().__init__(buf=buf, **kwargs)
+    def __init__(
+        self,
+        scramble_moves: int = 1,
+        max_steps: int = 50,
+        reward_mode: str = 'sparse',
+        solve_reward: float = 1.0,
+        step_penalty: float = 0.01,
+        render_mode: str = None,
+    ):
+        super().__init__()
 
-            self._scramble_moves = scramble_moves
-            self.max_steps = max_steps
-            self.reward_mode = reward_mode
-            self.solve_reward = solve_reward
-            self.step_penalty = step_penalty
+        self._scramble_moves = scramble_moves
+        self.max_steps = max_steps
+        self.reward_mode = reward_mode
+        self.solve_reward = solve_reward
+        self.step_penalty = step_penalty
+        self.render_mode = render_mode
 
-            # Inicializar cubo y estado
-            self.cube = RubiksCube()
-            self.step_count = 0
-            self.prev_correct = 0
-            self.rng = np.random.default_rng()
+        # Espacios
+        self.observation_space = spaces.Box(
+            low=0.0, high=1.0, shape=(324,), dtype=np.float32
+        )
+        self.action_space = spaces.Discrete(12)
 
-        @property
-        def scramble_moves(self):
-            return self._scramble_moves
+        # Estado interno
+        self.cube = RubiksCube()
+        self.step_count = 0
+        self.prev_correct = 0
+        self.rng = np.random.default_rng()
 
-        @scramble_moves.setter
-        def scramble_moves(self, value):
-            self._scramble_moves = max(1, min(value, 26))
+    @property
+    def scramble_moves(self):
+        return self._scramble_moves
 
-        def reset(self, seed=None):
-            """Resetea el entorno."""
-            if seed is not None:
-                self.rng = np.random.default_rng(seed)
+    @scramble_moves.setter
+    def scramble_moves(self, value):
+        self._scramble_moves = max(1, min(value, 26))
 
-            self.cube.reset()
-            self.cube.scramble(self._scramble_moves, self.rng)
-            self.step_count = 0
-            self.prev_correct = self.cube.count_correct_stickers()
+    def reset(self, seed=None, options=None):
+        """Resetea el entorno."""
+        if seed is not None:
+            self.rng = np.random.default_rng(seed)
 
-            # Escribir observacion al buffer
-            obs = self.cube.get_one_hot_state().flatten()
-            self.observations[:] = obs
+        self.cube.reset()
+        self.cube.scramble(self._scramble_moves, self.rng)
+        self.step_count = 0
+        self.prev_correct = self.cube.count_correct_stickers()
 
-            self.terminals[:] = False
-            self.truncations[:] = False
-            self.rewards[:] = 0.0
+        obs = self.cube.get_one_hot_state().flatten()
+        return obs, {}
 
-            return self.observations, {}
+    def step(self, action):
+        """Ejecuta un paso."""
+        # Aplicar movimiento
+        self.cube.apply_move(int(action))
+        self.step_count += 1
 
-        def step(self, actions):
-            """Ejecuta un paso."""
-            # Limpiar al inicio
-            self.rewards[:] = 0.0
-            self.terminals[:] = False
-            self.truncations[:] = False
+        is_solved = self.cube.is_solved()
+        terminated = False
+        truncated = False
 
-            action = actions[0] if hasattr(actions, '__iter__') else actions
-
-            # Aplicar movimiento
-            self.cube.apply_move(int(action))
-            self.step_count += 1
-
-            is_solved = self.cube.is_solved()
-
-            if self.reward_mode == 'sparse':
-                if is_solved:
-                    self.rewards[0] = self.solve_reward
-                    self.terminals[0] = True
-                else:
-                    self.rewards[0] = -self.step_penalty
+        if self.reward_mode == 'sparse':
+            if is_solved:
+                reward = self.solve_reward
+                terminated = True
             else:
-                current_correct = self.cube.count_correct_stickers()
-                progress_reward = (current_correct - self.prev_correct) / 54.0
-                self.prev_correct = current_correct
+                reward = -self.step_penalty
+        else:
+            current_correct = self.cube.count_correct_stickers()
+            progress_reward = (current_correct - self.prev_correct) / 54.0
+            self.prev_correct = current_correct
 
-                if is_solved:
-                    self.rewards[0] = self.solve_reward
-                    self.terminals[0] = True
-                else:
-                    self.rewards[0] = progress_reward - self.step_penalty
+            if is_solved:
+                reward = self.solve_reward
+                terminated = True
+            else:
+                reward = progress_reward - self.step_penalty
 
-            if self.step_count >= self.max_steps and not self.terminals[0]:
-                self.truncations[0] = True
+        if self.step_count >= self.max_steps and not terminated:
+            truncated = True
 
-            # Actualizar observacion
-            obs = self.cube.get_one_hot_state().flatten()
-            self.observations[:] = obs
+        obs = self.cube.get_one_hot_state().flatten()
+        info = {'solved': is_solved}
 
-            infos = {}
-            if self.terminals[0] or self.truncations[0]:
-                infos['solved'] = bool(self.terminals[0])
+        return obs, reward, terminated, truncated, info
 
-            return self.observations, self.rewards, self.terminals, self.truncations, infos
-
-        def render(self):
-            """Renderiza el cubo."""
+    def render(self):
+        """Renderiza el cubo."""
+        if self.render_mode == 'human':
             print(f"Paso: {self.step_count}")
             print(f"Stickers correctos: {self.cube.count_correct_stickers()}/54")
             print(self.cube)
 
-        def close(self):
+    def close(self):
+        pass
+
+
+# Funcion para crear entorno compatible con PufferLib v3.0
+def make_puffer_env(
+    scramble_moves: int = 1,
+    max_steps: int = 50,
+    reward_mode: str = 'sparse',
+    **kwargs
+):
+    """
+    Crea un entorno compatible con PufferLib v3.0.
+
+    Usa pufferlib.emulation.GymnasiumPufferEnv para envolver el entorno.
+    """
+    gym_env = GymnasiumRubiksCubeEnv(
+        scramble_moves=scramble_moves,
+        max_steps=max_steps,
+        reward_mode=reward_mode,
+        **kwargs
+    )
+
+    if PUFFER_AVAILABLE:
+        try:
+            # PufferLib v3.0 API
+            return pufferlib.emulation.GymnasiumPufferEnv(env_creator=lambda: gym_env)
+        except (AttributeError, TypeError):
+            # Fallback si la API es diferente
             pass
+
+    return gym_env
 
 
 def make_env(

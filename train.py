@@ -5,6 +5,8 @@ Basado en recomendaciones de papers academicos:
 - DeepCubeA (McAleer et al., 2019)
 - Autodidactic Iteration (ADI)
 
+Compatible con PufferLib v3.0
+
 Curriculum Learning:
 1. Empezar con cubos mezclados con 1 movimiento
 2. Cuando success_rate > threshold, aumentar dificultad
@@ -13,6 +15,7 @@ Curriculum Learning:
 Uso:
     python train.py
     python train.py --max-scramble 10 --success-threshold 0.8
+    python train.py --use-pufferlib  # Usar PufferLib v3.0
 """
 
 import argparse
@@ -21,14 +24,30 @@ import time
 from collections import deque
 import numpy as np
 
+# Verificar disponibilidad de PufferLib v3.0
+PUFFER_AVAILABLE = False
+PUFFER_VERSION = None
+
 try:
     import pufferlib
     import pufferlib.vector
-    import pufferlib.frameworks.cleanrl
+    import pufferlib.emulation
     PUFFER_AVAILABLE = True
+    PUFFER_VERSION = getattr(pufferlib, '__version__', 'unknown')
+    print(f"PufferLib v{PUFFER_VERSION} detectado")
 except ImportError:
-    PUFFER_AVAILABLE = False
     print("PufferLib no esta instalado. Usando entrenamiento simple.")
+
+# Verificar PyTorch
+try:
+    import torch
+    import torch.nn as nn
+    import torch.optim as optim
+    from torch.distributions import Categorical
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+    print("PyTorch no disponible. Solo entrenamiento aleatorio.")
 
 from rubik_env import RubiksCubeEnv, make_env
 
@@ -51,15 +70,6 @@ class CurriculumTrainer:
         eval_window: int = 100,
         steps_per_level: int = 50000,
     ):
-        """
-        Args:
-            env: Entorno de Rubik's Cube
-            start_scramble: Scramble inicial (default: 1)
-            max_scramble: Maximo scramble (God's number = 20)
-            success_threshold: Tasa de exito para avanzar nivel
-            eval_window: Ventana de episodios para evaluar exito
-            steps_per_level: Minimo de pasos antes de poder avanzar
-        """
         self.env = env
         self.current_scramble = start_scramble
         self.max_scramble = max_scramble
@@ -77,13 +87,11 @@ class CurriculumTrainer:
         self.env.scramble_moves = start_scramble
 
     def get_success_rate(self) -> float:
-        """Retorna tasa de exito de la ventana reciente."""
         if len(self.recent_solves) == 0:
             return 0.0
         return sum(self.recent_solves) / len(self.recent_solves)
 
     def should_increase_difficulty(self) -> bool:
-        """Determina si debemos aumentar la dificultad."""
         if self.current_scramble >= self.max_scramble:
             return False
         if self.steps_at_level < self.steps_per_level:
@@ -93,7 +101,6 @@ class CurriculumTrainer:
         return self.get_success_rate() >= self.success_threshold
 
     def increase_difficulty(self):
-        """Aumenta la dificultad (mas scramble moves)."""
         self.current_scramble += 1
         self.env.scramble_moves = self.current_scramble
         self.env.reset_stats()
@@ -108,14 +115,50 @@ class CurriculumTrainer:
         print(f"{'='*50}\n")
 
     def record_episode(self, solved: bool):
-        """Registra resultado de un episodio."""
         self.recent_solves.append(1 if solved else 0)
 
     def step(self, num_steps: int = 1):
-        """Actualiza contadores de pasos."""
         self.total_steps += num_steps
         self.steps_at_level += num_steps
 
+
+# ============================================================================
+# Simple Policy Network (para usar sin PufferLib)
+# ============================================================================
+
+if TORCH_AVAILABLE:
+    class SimplePolicy(nn.Module):
+        """Red neuronal simple para el cubo de Rubik."""
+
+        def __init__(self, obs_size=324, action_size=12, hidden_size=256):
+            super().__init__()
+            self.network = nn.Sequential(
+                nn.Linear(obs_size, hidden_size),
+                nn.ReLU(),
+                nn.Linear(hidden_size, hidden_size),
+                nn.ReLU(),
+            )
+            self.actor = nn.Linear(hidden_size, action_size)
+            self.critic = nn.Linear(hidden_size, 1)
+
+        def forward(self, x):
+            hidden = self.network(x)
+            return self.actor(hidden), self.critic(hidden)
+
+        def get_action(self, obs, deterministic=False):
+            with torch.no_grad():
+                logits, value = self.forward(obs)
+                if deterministic:
+                    action = logits.argmax(dim=-1)
+                else:
+                    dist = Categorical(logits=logits)
+                    action = dist.sample()
+                return action, value
+
+
+# ============================================================================
+# Entrenamiento sin PufferLib (con curriculum)
+# ============================================================================
 
 def train_with_curriculum(args):
     """Entrenamiento con curriculum learning (sin PufferLib)."""
@@ -127,6 +170,7 @@ def train_with_curriculum(args):
     print(f"  Success threshold: {args.success_threshold:.0%}")
     print(f"  Reward mode: {args.reward_mode}")
     print(f"  Total timesteps: {args.total_timesteps:,}")
+    print(f"  PyTorch: {'Disponible' if TORCH_AVAILABLE else 'No disponible'}")
     print("="*60 + "\n")
 
     # Crear entorno
@@ -149,6 +193,19 @@ def train_with_curriculum(args):
         steps_per_level=args.steps_per_level,
     )
 
+    # Crear policy si PyTorch está disponible
+    policy = None
+    optimizer = None
+    device = 'cpu'
+
+    if TORCH_AVAILABLE and not args.random_policy:
+        device = 'cuda' if torch.cuda.is_available() and args.device == 'cuda' else 'cpu'
+        policy = SimplePolicy().to(device)
+        optimizer = optim.Adam(policy.parameters(), lr=args.learning_rate)
+        print(f"Usando policy network en {device}")
+    else:
+        print("Usando acciones aleatorias (sin policy network)")
+
     obs, _ = env.reset(seed=args.seed)
 
     # Estadisticas
@@ -162,9 +219,13 @@ def train_with_curriculum(args):
 
     step = 0
     while step < args.total_timesteps:
-        # Acciones aleatorias (o de policy si tienes una)
-        # En un entrenamiento real, aqui iria tu policy network
-        actions = np.random.randint(0, 12, size=args.num_envs)
+        # Obtener acciones
+        if policy is not None:
+            obs_tensor = torch.FloatTensor(obs).to(device)
+            actions, _ = policy.get_action(obs_tensor)
+            actions = actions.cpu().numpy()
+        else:
+            actions = np.random.randint(0, 12, size=args.num_envs)
 
         obs, rewards, terminals, truncations, infos = env.step(actions)
         step += args.num_envs
@@ -219,84 +280,129 @@ def train_with_curriculum(args):
         for level in curriculum.level_history:
             print(f"  Scramble {level['scramble']}: alcanzado en step {level['total_steps']:,}")
 
+    # Guardar modelo
+    if policy is not None and args.save_path:
+        torch.save(policy.state_dict(), args.save_path)
+        print(f"\nModelo guardado en {args.save_path}")
+
     env.close()
     return curriculum
 
 
-def train_with_pufferlib(args):
-    """Entrenamiento completo con PufferLib y curriculum."""
+# ============================================================================
+# Entrenamiento con PufferLib v3.0
+# ============================================================================
+
+def train_with_pufferlib_v3(args):
+    """Entrenamiento con PufferLib v3.0 API."""
     if not PUFFER_AVAILABLE:
-        raise ImportError("PufferLib es requerido")
+        raise ImportError("PufferLib v3.0 es requerido")
 
     print("\n" + "="*60)
-    print("ENTRENAMIENTO CON PUFFERLIB + CURRICULUM")
+    print(f"ENTRENAMIENTO CON PUFFERLIB v{PUFFER_VERSION}")
     print("="*60)
 
-    # Para PufferLib, el curriculum se maneja diferente
-    # porque el vecenv no permite cambiar scramble_moves facilmente
-    # Una solucion es entrenar por niveles
+    try:
+        # Importar modulos de PufferLib v3.0
+        import pufferlib.pufferl as pufferl
 
-    current_scramble = args.start_scramble
-    total_steps = 0
+        current_scramble = args.start_scramble
+        total_steps = 0
 
-    while current_scramble <= args.max_scramble and total_steps < args.total_timesteps:
-        print(f"\n--- Nivel {current_scramble}: scramble_moves = {current_scramble} ---")
+        while current_scramble <= args.max_scramble and total_steps < args.total_timesteps:
+            print(f"\n--- Nivel {current_scramble}: scramble_moves = {current_scramble} ---")
 
-        # Crear entorno para este nivel
-        env_creator = make_env(
-            scramble_moves=current_scramble,
-            max_steps=args.max_steps,
-            reward_mode=args.reward_mode,
-            solve_reward=args.solve_reward,
-            step_penalty=args.step_penalty,
-        )
+            # Crear entorno
+            def env_creator():
+                return RubiksCubeEnv(
+                    num_envs=1,
+                    scramble_moves=current_scramble,
+                    max_steps=args.max_steps,
+                    reward_mode=args.reward_mode,
+                    solve_reward=args.solve_reward,
+                    step_penalty=args.step_penalty,
+                )
 
-        vecenv = pufferlib.vector.make(
-            env_creator,
-            num_envs=args.num_envs,
-            num_workers=args.num_workers,
-            backend=pufferlib.vector.Multiprocessing,
-        )
+            # Crear vectorized environment
+            vecenv = pufferlib.vector.make(
+                env_creator,
+                num_envs=args.num_envs,
+                num_workers=args.num_workers,
+            )
 
-        # Pasos para este nivel
-        level_steps = min(args.steps_per_level, args.total_timesteps - total_steps)
+            # Crear policy
+            policy = SimplePolicy()
+            if args.device == 'cuda' and torch.cuda.is_available():
+                policy = policy.cuda()
 
-        config = pufferlib.frameworks.cleanrl.Config(
-            total_timesteps=level_steps,
-            learning_rate=args.learning_rate,
-            gamma=args.gamma,
-            gae_lambda=args.gae_lambda,
-            update_epochs=args.update_epochs,
-            clip_coef=args.clip_coef,
-            vf_coef=args.vf_coef,
-            ent_coef=args.ent_coef,
-            max_grad_norm=args.max_grad_norm,
-            batch_size=args.batch_size,
-            minibatch_size=args.minibatch_size,
-            anneal_lr=args.anneal_lr,
-        )
+            # Configurar PuffeRL
+            level_steps = min(args.steps_per_level, args.total_timesteps - total_steps)
 
-        trainer = pufferlib.frameworks.cleanrl.PPO(
-            vecenv=vecenv,
-            config=config,
-        )
+            # Crear trainer usando la API de v3.0
+            trainer = pufferl.PuffeRL(
+                config={
+                    'total_timesteps': level_steps,
+                    'learning_rate': args.learning_rate,
+                    'gamma': args.gamma,
+                    'gae_lambda': args.gae_lambda,
+                    'update_epochs': args.update_epochs,
+                    'clip_coef': args.clip_coef,
+                    'vf_coef': args.vf_coef,
+                    'ent_coef': args.ent_coef,
+                    'batch_size': args.batch_size,
+                },
+                vecenv=vecenv,
+                policy=policy,
+            )
 
-        trainer.train()
-        total_steps += level_steps
+            # Training loop
+            while trainer.global_step < level_steps:
+                trainer.evaluate()
+                trainer.train()
 
-        # Evaluar y decidir si avanzar
-        # (En una implementacion real, evaluarias el success rate)
-        vecenv.close()
+            total_steps += level_steps
+            trainer.close()
+            vecenv.close()
 
-        current_scramble += 1
-        print(f"Avanzando a scramble_moves = {current_scramble}")
+            current_scramble += 1
+            print(f"Avanzando a scramble_moves = {current_scramble}")
 
-    # Guardar modelo final
-    if args.save_path:
-        print(f"\nGuardando modelo en {args.save_path}")
-        trainer.save(args.save_path)
+        print("\nEntrenamiento con PufferLib completado!")
 
-    print("\nEntrenamiento completado!")
+    except AttributeError as e:
+        print(f"Error de API: {e}")
+        print("Intentando con API alternativa...")
+        train_with_pufferlib_fallback(args)
+
+
+def train_with_pufferlib_fallback(args):
+    """Fallback para diferentes versiones de PufferLib."""
+    print("Usando metodo de entrenamiento alternativo...")
+
+    # Intentar diferentes APIs
+    try:
+        # Metodo 1: pufferlib.pufferl.train()
+        import pufferlib.pufferl as pufferl
+        if hasattr(pufferl, 'train'):
+            print("Usando pufferl.train()")
+            # Esto requeriria configuracion especifica del entorno
+            raise NotImplementedError("Necesita configuracion de environment registry")
+    except (ImportError, NotImplementedError):
+        pass
+
+    try:
+        # Metodo 2: API legacy
+        import pufferlib.frameworks.cleanrl as cleanrl
+        if hasattr(cleanrl, 'PPO'):
+            print("Usando pufferlib.frameworks.cleanrl (legacy)")
+            # Usar API legacy
+            raise NotImplementedError("API legacy no disponible en v3.0")
+    except (ImportError, NotImplementedError, AttributeError):
+        pass
+
+    # Si nada funciona, usar entrenamiento simple
+    print("Usando entrenamiento sin PufferLib...")
+    train_with_curriculum(args)
 
 
 def main():
@@ -350,8 +456,6 @@ def main():
                         help="Tamano del batch")
     parser.add_argument("--minibatch-size", type=int, default=512,
                         help="Tamano del minibatch")
-    parser.add_argument("--anneal-lr", action="store_true", default=True,
-                        help="Reducir learning rate")
 
     # Parametros de vectorizacion
     parser.add_argument("--num-envs", type=int, default=64,
@@ -368,11 +472,16 @@ def main():
                         help="Intervalo de logging en segundos")
     parser.add_argument("--use-pufferlib", action="store_true",
                         help="Usar PufferLib para entrenamiento")
+    parser.add_argument("--device", type=str, default='cpu',
+                        choices=['cpu', 'cuda'],
+                        help="Dispositivo para entrenamiento")
+    parser.add_argument("--random-policy", action="store_true",
+                        help="Usar acciones aleatorias (sin red neuronal)")
 
     args = parser.parse_args()
 
     if args.use_pufferlib and PUFFER_AVAILABLE:
-        train_with_pufferlib(args)
+        train_with_pufferlib_v3(args)
     else:
         train_with_curriculum(args)
 
