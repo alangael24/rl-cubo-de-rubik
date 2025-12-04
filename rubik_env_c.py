@@ -28,6 +28,11 @@ class RubiksCubeEnvC(gym.Env):
     Use this for training with PufferLib or other RL frameworks.
 
     Performance: >1M steps/second on a single core.
+
+    Atributos requeridos por PufferLib:
+    - num_agents: Numero de agentes (1 para single-agent)
+    - single_observation_space: Espacio de observacion por agente
+    - single_action_space: Espacio de accion por agente
     """
 
     metadata = {'render_modes': ['human']}
@@ -41,6 +46,7 @@ class RubiksCubeEnvC(gym.Env):
         step_penalty: float = 0.01,
         seed: int = None,
         render_mode: str = None,
+        buf=None,  # PufferLib buffer (no usado en single-env)
     ):
         """
         Initialize the environment.
@@ -53,6 +59,7 @@ class RubiksCubeEnvC(gym.Env):
             step_penalty: Penalty per step
             seed: Random seed
             render_mode: Render mode ('human' or None)
+            buf: PufferLib buffer (ignored for single env)
         """
         super().__init__()
 
@@ -69,6 +76,9 @@ class RubiksCubeEnvC(gym.Env):
         self.step_penalty = step_penalty
         self.render_mode = render_mode
 
+        # PufferLib requiere num_agents
+        self.num_agents = 1
+
         # Create C environment
         reward_mode_int = 0 if reward_mode == 'sparse' else 1
         self._env = rubik_c.RubikEnv(
@@ -80,13 +90,17 @@ class RubiksCubeEnvC(gym.Env):
             seed=seed or 42,
         )
 
-        # Define spaces
-        self.observation_space = spaces.Box(
+        # Define spaces - PufferLib usa single_observation_space y single_action_space
+        self.single_observation_space = spaces.Box(
             low=0.0, high=1.0,
             shape=(rubik_c.OBS_SIZE,),
             dtype=np.float32
         )
-        self.action_space = spaces.Discrete(rubik_c.NUM_ACTIONS)
+        self.single_action_space = spaces.Discrete(rubik_c.NUM_ACTIONS)
+
+        # Compatibilidad con Gymnasium
+        self.observation_space = self.single_observation_space
+        self.action_space = self.single_action_space
 
     def reset(self, seed=None, options=None):
         """Reset the environment."""

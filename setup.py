@@ -49,5 +49,5 @@ setup(
         ],
     },
     ext_modules=[rubik_c_extension],
-    py_modules=['rubik_cube', 'rubik_env', 'rubik_env_c', 'train'],
+    py_modules=['rubik_env_c', 'train'],
 )
