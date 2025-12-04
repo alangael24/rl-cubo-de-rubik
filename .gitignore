@@ -4,6 +4,10 @@ __pycache__/
 *.so
 .Python
 build/
+
+# C compiled binaries
+rubik_test
+*.o
 develop-eggs/
 dist/
 downloads/
