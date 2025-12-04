@@ -592,10 +592,9 @@ static inline void env_reset(RubikEnv* env) {
     // Write observation
     env_write_obs(env);
 
-    // Clear terminals/truncations
-    if (env->terminals) env->terminals[0] = 0;
-    if (env->truncations) env->truncations[0] = 0;
-    if (env->rewards) env->rewards[0] = 0.0f;
+    // NOTE: Don't clear terminals/truncations/rewards here!
+    // They are cleared at the START of env_step(), and we need to
+    // preserve them for Python to read after auto-reset.
 }
 
 static inline void env_step(RubikEnv* env, int action) {
