@@ -36,6 +36,14 @@ except ImportError as e:
     print(f">>> PUFFERLIB NATIVO NO DISPONIBLE: {e} <<<")
     print(">>> Run: python setup.py build_ext --inplace <<<")
 
+# Symmetry data augmentation (24x effective data multiplier)
+try:
+    from symmetry import apply_random_symmetry_batch, NUM_SYMMETRIES
+    SYMMETRY_AVAILABLE = True
+except ImportError:
+    SYMMETRY_AVAILABLE = False
+    print("Warning: symmetry module not found. Data augmentation disabled.")
+
 
 # ============================================================================
 # Utils
@@ -138,6 +146,7 @@ class PPOTrainer:
         success_threshold=0.8,
         curriculum_window=100,
         min_steps_per_level=50000,
+        use_symmetry_aug=True,
     ):
         self.env = env
         self.policy = policy.to(device)
@@ -153,6 +162,9 @@ class PPOTrainer:
         self.num_steps = num_steps
         self.num_minibatches = num_minibatches
         self.update_epochs = update_epochs
+
+        # Data augmentation
+        self.use_symmetry_aug = use_symmetry_aug and SYMMETRY_AVAILABLE
 
         self.optimizer = optim.Adam(policy.parameters(), lr=learning_rate, eps=1e-5)
 
@@ -250,6 +262,7 @@ class PPOTrainer:
         return advantages
 
     def update(self, advantages, returns):
+        """PPO update step with optional symmetry data augmentation."""
         b_obs = self.obs_buffer.reshape(-1, 324)
         b_actions = self.actions_buffer.reshape(-1)
         b_logprobs = self.logprobs_buffer.reshape(-1)
@@ -264,8 +277,17 @@ class PPOTrainer:
 
             for start in range(0, self.batch_size, self.minibatch_size):
                 mb_indices = indices[start:start + self.minibatch_size]
+
+                # Get minibatch observations
+                mb_obs = b_obs[mb_indices]
+
+                # Apply symmetry augmentation if enabled
+                # This forces the network to learn rotation-invariant features
+                if self.use_symmetry_aug:
+                    mb_obs = apply_random_symmetry_batch(mb_obs)
+
                 _, new_logprob, entropy, new_value = self.policy.get_action_and_value(
-                    b_obs[mb_indices], b_actions[mb_indices]
+                    mb_obs, b_actions[mb_indices]
                 )
 
                 logratio = new_logprob - b_logprobs[mb_indices]
@@ -299,6 +321,10 @@ class PPOTrainer:
         print(f"  Num envs: {self.num_envs}")
         print(f"  Batch size: {self.batch_size}")
         print(f"  Total timesteps: {total_timesteps:,}")
+        if self.use_symmetry_aug:
+            print(f"  Symmetry augmentation: ENABLED (24x data multiplier)")
+        else:
+            print(f"  Symmetry augmentation: disabled")
         print(f"{'='*60}\n")
 
         num_updates = total_timesteps // self.batch_size
@@ -345,10 +371,14 @@ def main():
     parser.add_argument("--num-steps", type=int, default=128)
     parser.add_argument("--hidden-size", type=int, default=512)
     parser.add_argument("--num-blocks", type=int, default=4)
+    parser.add_argument("--use-symmetry-aug", action="store_true", default=True,
+                        help="Enable symmetry data augmentation (24x effective data)")
+    parser.add_argument("--no-symmetry-aug", action="store_false", dest="use_symmetry_aug",
+                        help="Disable symmetry data augmentation")
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--save-path", type=str, default="rubik_puffer.pt")
-    parser.add_argument("--log-interval", type=int, default=10)
+    parser.add_argument("--log-interval", type=int, default=1)
 
     args = parser.parse_args()
 
@@ -387,6 +417,7 @@ def main():
         num_steps=args.num_steps,
         start_scramble=args.scramble_moves,
         max_scramble=args.max_scramble,
+        use_symmetry_aug=args.use_symmetry_aug,
     )
 
     # Train
