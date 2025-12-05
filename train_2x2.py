@@ -1,15 +1,16 @@
 """
-Entrenamiento del Cubo de Rubik usando PufferLib 3.0 NATIVO
+Entrenamiento del Cubo de Rubik 2x2 (Pocket Cube)
 
-Este script usa la API nativa de PufferLib para maximo rendimiento:
-- RubikPufferEnv hereda de pufferlib.PufferEnv
-- Buffers compartidos con C (zero-copy)
-- 15+ MILLONES de pasos por segundo
+El 2x2 es más simple que el 3x3:
+- 24 stickers (vs 54)
+- 9 movimientos (vs 12)
+- God's number = 11 (vs 20)
+- Perfecto para probar algoritmos rápidamente
 
 Uso:
-    python train_puffer.py                     # Entrenar con defaults
-    python train_puffer.py --num-envs 1024     # Mas entornos paralelos
-    python train_puffer.py --device cuda       # Usar GPU
+    python train_2x2.py                     # Entrenar con defaults
+    python train_2x2.py --num-envs 1024     # Más entornos
+    python train_2x2.py --device cuda       # Usar GPU
 """
 
 import argparse
@@ -24,43 +25,26 @@ from torch.distributions import Categorical
 
 torch.set_num_threads(1)
 
-# PufferLib import
-import pufferlib
-
-# Import native PufferLib environment
+# Import 2x2 C extension
 try:
-    from rubik_puffer import RubikPufferEnv
-    import rubik_c
-    NATIVE_AVAILABLE = True
-    print(">>> PUFFERLIB NATIVO DISPONIBLE - 15M+ SPS <<<")
+    import rubik2x2_c
+    C_AVAILABLE = True
+    print(f">>> CUBO 2x2 DISPONIBLE - {rubik2x2_c.NUM_ACTIONS} acciones, {rubik2x2_c.OBS_SIZE} obs <<<")
 except ImportError as e:
-    NATIVE_AVAILABLE = False
-    print(f">>> PUFFERLIB NATIVO NO DISPONIBLE: {e} <<<")
+    C_AVAILABLE = False
+    print(f">>> CUBO 2x2 NO DISPONIBLE: {e} <<<")
     print(">>> Run: python setup.py build_ext --inplace <<<")
-
-# Symmetry data augmentation (24x effective data multiplier)
-try:
-    from symmetry import apply_random_symmetry_batch, NUM_SYMMETRIES
-    SYMMETRY_AVAILABLE = True
-except ImportError:
-    SYMMETRY_AVAILABLE = False
-    print("Warning: symmetry module not found. Data augmentation disabled.")
 
 
 # ============================================================================
-# Utils
+# Policy Network (más pequeña para 2x2)
 # ============================================================================
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
-    """Inicializacion ortogonal para capas lineales."""
     nn.init.orthogonal_(layer.weight, std)
     nn.init.constant_(layer.bias, bias_const)
     return layer
 
-
-# ============================================================================
-# Policy Network (ResNet para Rubik's Cube)
-# ============================================================================
 
 class ResidualBlock(nn.Module):
     def __init__(self, hidden_size):
@@ -74,18 +58,14 @@ class ResidualBlock(nn.Module):
         residual = x
         x = F.relu(self.ln1(self.fc1(x)))
         x = self.ln2(self.fc2(x))
-        x = F.relu(x + residual)
-        return x
+        return F.relu(x + residual)
 
 
-class RubikPolicy(nn.Module):
-    """ResNet Policy compatible con PufferLib."""
+class Policy2x2(nn.Module):
+    """Red más pequeña para el cubo 2x2."""
 
-    def __init__(self, env, hidden_size=512, num_blocks=4):
+    def __init__(self, obs_size=144, action_size=9, hidden_size=256, num_blocks=2):
         super().__init__()
-
-        obs_size = env.single_observation_space.shape[0]
-        action_size = env.single_action_space.n
 
         self.input_fc = layer_init(nn.Linear(obs_size, hidden_size))
         self.input_ln = nn.LayerNorm(hidden_size)
@@ -122,15 +102,13 @@ class RubikPolicy(nn.Module):
 
 
 # ============================================================================
-# PPO Trainer con PufferLib NATIVO
+# PPO Trainer
 # ============================================================================
 
 class PPOTrainer:
-    """PPO Trainer usando PufferLib NATIVO (15M+ SPS)."""
-
     def __init__(
         self,
-        env,  # RubikPufferEnv instance
+        env,
         policy,
         device='cpu',
         learning_rate=3e-4,
@@ -144,16 +122,15 @@ class PPOTrainer:
         num_minibatches=4,
         update_epochs=4,
         start_scramble=1,
-        max_scramble=20,
+        max_scramble=11,  # God's number for 2x2
         success_threshold=0.8,
         curriculum_window=100,
-        min_steps_per_level=50000,
-        use_symmetry_aug=True,
+        min_steps_per_level=20000,
     ):
         self.env = env
         self.policy = policy.to(device)
         self.device = device
-        self.num_envs = env.num_agents
+        self.num_envs = env.num_envs
 
         self.gamma = gamma
         self.gae_lambda = gae_lambda
@@ -164,9 +141,6 @@ class PPOTrainer:
         self.num_steps = num_steps
         self.num_minibatches = num_minibatches
         self.update_epochs = update_epochs
-
-        # Data augmentation
-        self.use_symmetry_aug = use_symmetry_aug and SYMMETRY_AVAILABLE
 
         self.optimizer = optim.Adam(policy.parameters(), lr=learning_rate, eps=1e-5)
 
@@ -181,7 +155,7 @@ class PPOTrainer:
         self.batch_size = self.num_envs * self.num_steps
         self.minibatch_size = self.batch_size // self.num_minibatches
 
-        obs_size = 324
+        obs_size = rubik2x2_c.OBS_SIZE
         self.obs_buffer = torch.zeros((num_steps, self.num_envs, obs_size), device=device)
         self.actions_buffer = torch.zeros((num_steps, self.num_envs), dtype=torch.long, device=device)
         self.logprobs_buffer = torch.zeros((num_steps, self.num_envs), device=device)
@@ -207,7 +181,7 @@ class PPOTrainer:
 
     def increase_difficulty(self):
         self.current_scramble += 1
-        self.env.scramble_moves = self.current_scramble  # Update C environment
+        self.env.scramble_moves = self.current_scramble
         self.recent_solves.clear()
         self.steps_at_level = 0
         print(f"\n{'='*50}")
@@ -226,8 +200,7 @@ class PPOTrainer:
             self.logprobs_buffer[step] = logprob
             self.values_buffer[step] = value
 
-            # Step environment - native PufferLib returns numpy arrays directly
-            next_obs, rewards, terminals, truncations, infos = self.env.step(
+            next_obs, rewards, terminals, truncations, _ = self.env.step(
                 action.cpu().numpy().astype(np.int32)
             )
 
@@ -264,8 +237,8 @@ class PPOTrainer:
         return advantages
 
     def update(self, advantages, returns):
-        """PPO update step with optional symmetry data augmentation."""
-        b_obs = self.obs_buffer.reshape(-1, 324)
+        obs_size = rubik2x2_c.OBS_SIZE
+        b_obs = self.obs_buffer.reshape(-1, obs_size)
         b_actions = self.actions_buffer.reshape(-1)
         b_logprobs = self.logprobs_buffer.reshape(-1)
         b_advantages = advantages.reshape(-1)
@@ -279,14 +252,7 @@ class PPOTrainer:
 
             for start in range(0, self.batch_size, self.minibatch_size):
                 mb_indices = indices[start:start + self.minibatch_size]
-
-                # Get minibatch observations
                 mb_obs = b_obs[mb_indices]
-
-                # Apply symmetry augmentation if enabled
-                # This forces the network to learn rotation-invariant features
-                if self.use_symmetry_aug:
-                    mb_obs = apply_random_symmetry_batch(mb_obs)
 
                 _, new_logprob, entropy, new_value = self.policy.get_action_and_value(
                     mb_obs, b_actions[mb_indices]
@@ -315,18 +281,15 @@ class PPOTrainer:
         return {'pg_loss': pg_loss.item(), 'v_loss': v_loss.item(),
                 'entropy': entropy_loss.item(), 'clipfrac': np.mean(clipfracs)}
 
-    def train(self, total_timesteps, log_interval=10):
+    def train(self, total_timesteps, log_interval=1):
         print(f"\n{'='*60}")
-        print("ENTRENAMIENTO CON PUFFERLIB NATIVO")
+        print("ENTRENAMIENTO CUBO 2x2")
         print(f"{'='*60}")
         print(f"  Device: {self.device}")
         print(f"  Num envs: {self.num_envs}")
         print(f"  Batch size: {self.batch_size}")
         print(f"  Total timesteps: {total_timesteps:,}")
-        if self.use_symmetry_aug:
-            print(f"  Symmetry augmentation: ENABLED (24x data multiplier)")
-        else:
-            print(f"  Symmetry augmentation: disabled")
+        print(f"  Max scramble: {self.max_scramble} (God's number)")
         print(f"{'='*60}\n")
 
         num_updates = total_timesteps // self.batch_size
@@ -347,7 +310,8 @@ class PPOTrainer:
                 elapsed = time.time() - start_time
                 sps = self.global_step / elapsed
                 print(f"Update {update}/{num_updates} | Step {self.global_step:,} | "
-                      f"Scramble {self.current_scramble} | Success {self.get_success_rate():.1%} | SPS {sps:,.0f}")
+                      f"Scramble {self.current_scramble}/{self.max_scramble} | "
+                      f"Success {self.get_success_rate():.1%} | SPS {sps:,.0f}")
                 print(f"  pg={losses['pg_loss']:.4f} v={losses['v_loss']:.4f} "
                       f"ent={losses['entropy']:.4f} clip={losses['clipfrac']:.3f}")
 
@@ -355,7 +319,44 @@ class PPOTrainer:
         print(f"\n{'='*60}")
         print(f"COMPLETADO - {self.global_step:,} steps en {elapsed:.1f}s ({self.global_step/elapsed:,.0f} SPS)")
         print(f"Success rate: {self.get_success_rate():.1%} | Solves: {self.solve_count:,}/{self.episode_count:,}")
+        print(f"Scramble level: {self.current_scramble}/{self.max_scramble}")
         print(f"{'='*60}")
+
+
+# ============================================================================
+# Wrapper for batch environment
+# ============================================================================
+
+class Rubik2x2BatchEnv:
+    """Wrapper around C batch environment."""
+
+    def __init__(self, num_envs, scramble_moves, max_steps, seed=42):
+        self._env = rubik2x2_c.Rubik2x2BatchEnv(
+            num_envs=num_envs,
+            scramble_moves=scramble_moves,
+            max_steps=max_steps,
+            solve_reward=1.0,
+            step_penalty=0.01,
+            reward_mode=0,
+            seed=seed,
+        )
+        self.num_envs = num_envs
+        self._scramble_moves = scramble_moves
+
+    @property
+    def scramble_moves(self):
+        return self._scramble_moves
+
+    @scramble_moves.setter
+    def scramble_moves(self, value):
+        self._scramble_moves = value
+        self._env.scramble_moves = value
+
+    def reset(self):
+        return self._env.reset()
+
+    def step(self, actions):
+        return self._env.step(actions)
 
 
 # ============================================================================
@@ -363,30 +364,25 @@ class PPOTrainer:
 # ============================================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="Entrenar Cubo de Rubik con PufferLib NATIVO")
-    parser.add_argument("--num-envs", type=int, default=1024)  # More envs for higher throughput
+    parser = argparse.ArgumentParser(description="Entrenar Cubo 2x2 con PPO")
+    parser.add_argument("--num-envs", type=int, default=256)
     parser.add_argument("--scramble-moves", type=int, default=1)
-    parser.add_argument("--max-scramble", type=int, default=20)
-    parser.add_argument("--max-steps", type=int, default=50)
-    parser.add_argument("--total-timesteps", type=int, default=10_000_000)
+    parser.add_argument("--max-scramble", type=int, default=11)  # God's number
+    parser.add_argument("--max-steps", type=int, default=20)
+    parser.add_argument("--total-timesteps", type=int, default=2_000_000)
     parser.add_argument("--learning-rate", type=float, default=3e-4)
-    parser.add_argument("--num-steps", type=int, default=128)
-    parser.add_argument("--hidden-size", type=int, default=512)
-    parser.add_argument("--num-blocks", type=int, default=4)
-    parser.add_argument("--use-symmetry-aug", action="store_true", default=True,
-                        help="Enable symmetry data augmentation (24x effective data)")
-    parser.add_argument("--no-symmetry-aug", action="store_false", dest="use_symmetry_aug",
-                        help="Disable symmetry data augmentation")
+    parser.add_argument("--num-steps", type=int, default=64)
+    parser.add_argument("--hidden-size", type=int, default=256)
+    parser.add_argument("--num-blocks", type=int, default=2)
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--save-path", type=str, default="rubik_puffer.pt")
+    parser.add_argument("--save-path", type=str, default="rubik_2x2.pt")
     parser.add_argument("--log-interval", type=int, default=1)
-    parser.add_argument("--update-epochs", type=int, default=4)
 
     args = parser.parse_args()
 
-    if not NATIVE_AVAILABLE:
-        print("ERROR: PufferLib nativo no disponible.")
+    if not C_AVAILABLE:
+        print("ERROR: Módulo 2x2 no disponible.")
         print("Ejecuta: python setup.py build_ext --inplace")
         return
 
@@ -397,25 +393,29 @@ def main():
         print("CUDA no disponible, usando CPU")
         args.device = "cpu"
 
-    # Create native PufferLib environment
-    print(f"Creando {args.num_envs} entornos con PufferLib NATIVO...")
-    env = RubikPufferEnv(
+    # Create environment
+    print(f"Creando {args.num_envs} entornos 2x2...")
+    env = Rubik2x2BatchEnv(
         num_envs=args.num_envs,
         scramble_moves=args.scramble_moves,
         max_steps=args.max_steps,
         seed=args.seed,
     )
-    print(f"Entorno creado: {env.num_agents} agentes")
+    print(f"Entorno creado: {env.num_envs} agentes")
 
     # Create policy
-    policy = RubikPolicy(env, args.hidden_size, args.num_blocks)
-    
-    # --- AÑADIR ESTO ---
+    policy = Policy2x2(
+        obs_size=rubik2x2_c.OBS_SIZE,
+        action_size=rubik2x2_c.NUM_ACTIONS,
+        hidden_size=args.hidden_size,
+        num_blocks=args.num_blocks,
+    )
+
+    # Try to compile with torch 2.0+
     if int(torch.__version__.split(".")[0]) >= 2:
-        print(">>> Compilando modelo... (esto tardará un minuto al inicio) <<<")
+        print(">>> Compilando modelo... <<<")
         policy = torch.compile(policy)
-    # -------------------
-    
+
     print(f"Policy: {sum(p.numel() for p in policy.parameters()):,} parametros")
 
     # Create trainer
@@ -427,8 +427,6 @@ def main():
         num_steps=args.num_steps,
         start_scramble=args.scramble_moves,
         max_scramble=args.max_scramble,
-        use_symmetry_aug=args.use_symmetry_aug,
-        update_epochs=args.update_epochs,
     )
 
     # Train
@@ -441,8 +439,6 @@ def main():
         'args': vars(args),
     }, args.save_path)
     print(f"Modelo guardado en {args.save_path}")
-
-    env.close()
 
 
 if __name__ == "__main__":
