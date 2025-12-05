@@ -8,9 +8,17 @@ El 2x2 es más simple que el 3x3:
 - Perfecto para probar algoritmos rápidamente
 
 Uso:
-    python train_2x2.py                     # Entrenar con defaults
-    python train_2x2.py --num-envs 1024     # Más entornos
-    python train_2x2.py --device cuda       # Usar GPU
+    # Entrenamiento rápido (2M steps, ~80% success en nivel 7)
+    python train_2x2.py --total-timesteps 2_000_000
+
+    # Entrenamiento completo (5M+ steps, ~95%+ success en nivel 11)
+    python train_2x2.py --total-timesteps 10_000_000 --num-envs 512 --success-threshold 0.99
+
+    # Con GPU
+    python train_2x2.py --device cuda --num-envs 1024
+
+    # Ajustar curriculum
+    python train_2x2.py --success-threshold 0.99 --min-steps-per-level 50000
 """
 
 import argparse
@@ -123,9 +131,9 @@ class PPOTrainer:
         update_epochs=4,
         start_scramble=1,
         max_scramble=11,  # God's number for 2x2
-        success_threshold=0.8,
-        curriculum_window=100,
-        min_steps_per_level=20000,
+        success_threshold=0.98,  # Aumentado de 0.95 a 0.98 para mejor maestría
+        curriculum_window=200,   # Más muestras para decidir avance
+        min_steps_per_level=40000,  # Más pasos por nivel antes de avanzar
     ):
         self.env = env
         self.policy = policy.to(device)
@@ -290,6 +298,10 @@ class PPOTrainer:
         print(f"  Batch size: {self.batch_size}")
         print(f"  Total timesteps: {total_timesteps:,}")
         print(f"  Max scramble: {self.max_scramble} (God's number)")
+        print(f"\n  Curriculum:")
+        print(f"    Success threshold: {self.success_threshold:.1%}")
+        print(f"    Window: {self.curriculum_window} episodes")
+        print(f"    Min steps/level: {self.min_steps_per_level:,}")
         print(f"{'='*60}\n")
 
         num_updates = total_timesteps // self.batch_size
@@ -374,7 +386,8 @@ def main():
     parser.add_argument("--scramble-moves", type=int, default=1)
     parser.add_argument("--max-scramble", type=int, default=11)  # God's number
     parser.add_argument("--max-steps", type=int, default=20)
-    parser.add_argument("--total-timesteps", type=int, default=2_000_000)
+    parser.add_argument("--total-timesteps", type=int, default=5_000_000,
+                        help="Total training steps (default: 5M for good performance)")
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--num-steps", type=int, default=64)
     parser.add_argument("--hidden-size", type=int, default=256)
@@ -383,6 +396,14 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--save-path", type=str, default="rubik_2x2.pt")
     parser.add_argument("--log-interval", type=int, default=1)
+
+    # Curriculum parameters
+    parser.add_argument("--success-threshold", type=float, default=0.98,
+                        help="Success rate required to advance curriculum (default: 0.98)")
+    parser.add_argument("--curriculum-window", type=int, default=200,
+                        help="Number of episodes to average for curriculum decision (default: 200)")
+    parser.add_argument("--min-steps-per-level", type=int, default=40000,
+                        help="Minimum steps before advancing curriculum (default: 40000)")
 
     args = parser.parse_args()
 
@@ -438,6 +459,9 @@ def main():
         num_steps=args.num_steps,
         start_scramble=args.scramble_moves,
         max_scramble=args.max_scramble,
+        success_threshold=args.success_threshold,
+        curriculum_window=args.curriculum_window,
+        min_steps_per_level=args.min_steps_per_level,
     )
 
     # Train
