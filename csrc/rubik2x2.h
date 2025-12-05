@@ -567,4 +567,15 @@ static inline void batch2_env_set_scramble(Rubik2x2BatchEnv* batch, int scramble
     }
 }
 
+// Staggered resets according to paper 2511.21011
+// Distributes step_count uniformly across environments to desynchronize resets
+static inline void batch2_stagger_steps(Rubik2x2BatchEnv* batch) {
+    for (int i = 0; i < batch->num_envs; i++) {
+        // Distribute step counts uniformly across the horizon
+        // This makes environments reach max_steps at different times
+        int offset = (int)((double)i / batch->num_envs * batch->max_steps);
+        batch->envs[i].step_count = offset;
+    }
+}
+
 #endif // RUBIK2X2_H

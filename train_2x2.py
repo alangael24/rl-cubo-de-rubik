@@ -358,6 +358,11 @@ class Rubik2x2BatchEnv:
     def step(self, actions):
         return self._env.step(actions)
 
+    def stagger(self):
+        """Apply staggered resets to desynchronize environments (paper 2511.21011)."""
+        if hasattr(self._env, 'stagger'):
+            self._env.stagger()
+
 
 # ============================================================================
 # Main
@@ -401,7 +406,13 @@ def main():
         max_steps=args.max_steps,
         seed=args.seed,
     )
-    print(f"Entorno creado: {env.num_envs} agentes")
+
+    # Apply staggered resets (paper 2511.21011)
+    # This desynchronizes environment resets to avoid cyclic non-stationarity
+    print("Aplicando Staggered Resets...")
+    env.reset()    # First reset all to step 0
+    env.stagger()  # Then distribute step counts uniformly
+    print(f"Entorno creado: {env.num_envs} agentes (staggered)")
 
     # Create policy
     policy = Policy2x2(

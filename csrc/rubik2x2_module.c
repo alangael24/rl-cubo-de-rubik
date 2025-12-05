@@ -255,9 +255,15 @@ static PyGetSetDef PyRubik2x2BatchEnv_getsetters[] = {
     {NULL}
 };
 
+static PyObject* PyRubik2x2BatchEnv_stagger(PyRubik2x2BatchEnv* self, PyObject* Py_UNUSED(args)) {
+    batch2_stagger_steps(&self->batch);
+    Py_RETURN_NONE;
+}
+
 static PyMethodDef PyRubik2x2BatchEnv_methods[] = {
     {"reset", (PyCFunction)PyRubik2x2BatchEnv_reset, METH_VARARGS, "Reset all environments"},
     {"step", (PyCFunction)PyRubik2x2BatchEnv_step, METH_VARARGS, "Step all environments"},
+    {"stagger", (PyCFunction)PyRubik2x2BatchEnv_stagger, METH_NOARGS, "Apply staggered resets (paper 2511.21011)"},
     {NULL}
 };
 
