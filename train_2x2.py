@@ -19,6 +19,9 @@ Uso:
 
     # Ajustar curriculum
     python train_2x2.py --success-threshold 0.99 --min-steps-per-level 50000
+
+    # RESUME TRAINING: Continuar desde checkpoint anterior
+    python train_2x2.py --load-path rubik_2x2.pt --save-path rubik_2x2_v2.pt
 """
 
 import argparse
@@ -395,6 +398,8 @@ def main():
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--save-path", type=str, default="rubik_2x2.pt")
+    parser.add_argument("--load-path", type=str, default=None,
+                        help="Path to checkpoint to resume training from")
     parser.add_argument("--log-interval", type=int, default=1)
 
     # Curriculum parameters
@@ -443,6 +448,43 @@ def main():
         num_blocks=args.num_blocks,
     )
 
+    # Resume training: load checkpoint if provided
+    start_scramble = args.scramble_moves
+    if args.load_path:
+        print(f"\n>>> CARGANDO CHECKPOINT: {args.load_path} <<<")
+        checkpoint = torch.load(args.load_path, map_location=args.device)
+
+        # Get saved architecture params to recreate policy correctly
+        saved_args = checkpoint.get('args', {})
+        saved_hidden = saved_args.get('hidden_size', args.hidden_size)
+        saved_blocks = saved_args.get('num_blocks', args.num_blocks)
+
+        # Recreate policy with correct architecture if different
+        if saved_hidden != args.hidden_size or saved_blocks != args.num_blocks:
+            print(f">>> Usando arquitectura del checkpoint: hidden={saved_hidden}, blocks={saved_blocks} <<<")
+            policy = Policy2x2(
+                obs_size=rubik2x2_c.OBS_SIZE,
+                action_size=rubik2x2_c.NUM_ACTIONS,
+                hidden_size=saved_hidden,
+                num_blocks=saved_blocks,
+            )
+
+        # Load policy weights (handle torch.compile prefix)
+        state_dict = checkpoint['policy_state_dict']
+        new_state_dict = {}
+        for k, v in state_dict.items():
+            if k.startswith('_orig_mod.'):
+                new_state_dict[k[10:]] = v
+            else:
+                new_state_dict[k] = v
+        policy.load_state_dict(new_state_dict)
+
+        # Restore curriculum level
+        if 'scramble_level' in checkpoint:
+            start_scramble = checkpoint['scramble_level']
+            env.scramble_moves = start_scramble
+            print(f">>> RETOMANDO DESDE NIVEL: {start_scramble}/{args.max_scramble} <<<\n")
+
     # Try to compile with torch 2.0+
     if int(torch.__version__.split(".")[0]) >= 2:
         print(">>> Compilando modelo... <<<")
@@ -457,7 +499,7 @@ def main():
         device=args.device,
         learning_rate=args.learning_rate,
         num_steps=args.num_steps,
-        start_scramble=args.scramble_moves,
+        start_scramble=start_scramble,  # Use loaded level or default
         max_scramble=args.max_scramble,
         success_threshold=args.success_threshold,
         curriculum_window=args.curriculum_window,
