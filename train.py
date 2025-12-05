@@ -28,6 +28,14 @@ from rubik_env_c import RubiksCubeBatchEnvC as RubiksCubeEnv
 C_BACKEND = True
 print(">>> USANDO BACKEND C (OPTIMIZADO) <<<")
 
+# Symmetry data augmentation
+try:
+    from symmetry import apply_random_symmetry_batch, NUM_SYMMETRIES
+    SYMMETRY_AVAILABLE = True
+except ImportError:
+    SYMMETRY_AVAILABLE = False
+    print("Warning: symmetry module not found. Data augmentation disabled.")
+
 # ============================================================================
 # PyTorch
 # ============================================================================
@@ -204,6 +212,8 @@ class PPOTrainer:
         success_threshold: float = 0.8,
         curriculum_window: int = 100,
         min_steps_per_level: int = 50000,
+        # Data augmentation
+        use_symmetry_aug: bool = True,
     ):
         self.env = env
         self.policy = policy.to(device)
@@ -220,6 +230,9 @@ class PPOTrainer:
         self.num_steps = num_steps
         self.num_minibatches = num_minibatches
         self.update_epochs = update_epochs
+
+        # Data augmentation
+        self.use_symmetry_aug = use_symmetry_aug and SYMMETRY_AVAILABLE
 
         # Optimizer
         self.optimizer = optim.Adam(policy.parameters(), lr=learning_rate, eps=1e-5)
@@ -342,7 +355,7 @@ class PPOTrainer:
         return advantages
 
     def update(self, advantages, returns):
-        """PPO update step."""
+        """PPO update step with optional symmetry data augmentation."""
         # Flatten batches
         b_obs = self.obs_buffer.reshape(-1, 324)
         b_actions = self.actions_buffer.reshape(-1)
@@ -364,8 +377,16 @@ class PPOTrainer:
                 end = start + self.minibatch_size
                 mb_indices = indices[start:end]
 
+                # Get minibatch observations
+                mb_obs = b_obs[mb_indices]
+
+                # Apply symmetry augmentation if enabled
+                # This forces the network to learn rotation-invariant features
+                if self.use_symmetry_aug:
+                    mb_obs = apply_random_symmetry_batch(mb_obs)
+
                 _, new_logprob, entropy, new_value = self.policy.get_action_and_value(
-                    b_obs[mb_indices], b_actions[mb_indices]
+                    mb_obs, b_actions[mb_indices]
                 )
 
                 # Policy loss
@@ -413,6 +434,10 @@ class PPOTrainer:
         print(f"  Batch size: {self.batch_size}")
         print(f"  Total timesteps: {total_timesteps:,}")
         print(f"  Scramble inicial: {self.current_scramble}")
+        if self.use_symmetry_aug:
+            print(f"  Symmetry augmentation: ENABLED (24x data multiplier)")
+        else:
+            print(f"  Symmetry augmentation: disabled")
         print(f"{'='*60}\n")
 
         # Set initial scramble
@@ -505,6 +530,12 @@ def main():
     parser.add_argument("--num-blocks", type=int, default=4,
                         help="Numero de bloques residuales")
 
+    # Data augmentation
+    parser.add_argument("--use-symmetry-aug", action="store_true", default=True,
+                        help="Enable symmetry data augmentation (24x effective data)")
+    parser.add_argument("--no-symmetry-aug", action="store_false", dest="use_symmetry_aug",
+                        help="Disable symmetry data augmentation")
+
     # Other
     parser.add_argument("--device", type=str, default="cpu",
                         choices=["cpu", "cuda"],
@@ -568,6 +599,7 @@ def main():
         start_scramble=args.start_scramble,
         max_scramble=args.max_scramble,
         success_threshold=args.success_threshold,
+        use_symmetry_aug=args.use_symmetry_aug,
     )
 
     # Train
