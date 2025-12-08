@@ -23,7 +23,7 @@ if sys.platform == 'darwin':  # macOS
 if os.environ.get('DEBUG'):
     extra_compile_args = ['-g', '-O0', '-fsanitize=address']
 
-# Define the extension module
+# Define the extension modules
 rubik_c_extension = Extension(
     'rubik_c',
     sources=['csrc/rubik_binding.c'],
@@ -32,10 +32,19 @@ rubik_c_extension = Extension(
     define_macros=[('NPY_NO_DEPRECATED_API', 'NPY_1_7_API_VERSION')],
 )
 
+# 2x2 Rubik's Cube extension
+rubik2x2_c_extension = Extension(
+    'rubik2x2_c',
+    sources=['csrc/rubik2x2_module.c'],
+    include_dirs=[numpy_include, 'csrc'],
+    extra_compile_args=extra_compile_args,
+    define_macros=[('NPY_NO_DEPRECATED_API', 'NPY_1_7_API_VERSION')],
+)
+
 setup(
     name='rubik-cube-rl',
     version='1.0.0',
-    description='High-performance Rubik\'s Cube RL environment',
+    description='High-performance Rubik\'s Cube RL environment (2x2 and 3x3)',
     author='Claude',
     python_requires='>=3.8',
     install_requires=[
@@ -48,6 +57,6 @@ setup(
             'pufferlib>=3.0.0',
         ],
     },
-    ext_modules=[rubik_c_extension],
-    py_modules=['rubik_cube', 'rubik_env', 'rubik_env_c', 'train'],
+    ext_modules=[rubik_c_extension, rubik2x2_c_extension],
+    py_modules=['rubik_puffer', 'train_puffer', 'symmetry'],
 )
