@@ -14,7 +14,20 @@ pip install -r requirements.txt
 
 ## Uso
 
-### Entrenar con Curriculum Learning (recomendado)
+### Entrenar con PufferLib CLI (recomendado)
+
+```bash
+# Entrenamiento simple
+python train_puffer.py
+
+# Con GPU
+python train_puffer.py --device cuda
+
+# Con curriculum learning (aumenta dificultad progresivamente)
+python train_puffer.py --mode curriculum
+```
+
+### Entrenar con script standalone
 
 ```bash
 # Entrenamiento basico con curriculum
@@ -22,13 +35,6 @@ python train.py
 
 # Con parametros personalizados
 python train.py --max-scramble 10 --success-threshold 0.8 --total-timesteps 500000
-```
-
-### Con PufferLib (alto rendimiento)
-
-```bash
-pip install pufferlib
-python train.py --use-pufferlib
 ```
 
 ### Probar el entorno
@@ -43,8 +49,10 @@ python rubik_cube.py
 | Archivo | Descripcion |
 |---------|-------------|
 | `rubik_cube.py` | Simulador del cubo de Rubik 3x3 |
-| `rubik_env.py` | Entorno PufferEnv para RL |
-| `train.py` | Script de entrenamiento con curriculum |
+| `rubik_env.py` | Entorno Gymnasium/PufferLib para RL |
+| `train_puffer.py` | **Entrenamiento con PufferLib CLI oficial** |
+| `train.py` | Script de entrenamiento standalone |
+| `config/rubiks_cube.ini` | Configuracion PufferLib |
 | `rubik.ini` | Configuracion de hiperparametros |
 
 ## Caracteristicas academicas
@@ -118,7 +126,46 @@ Esto es el estandar validado por la literatura.
 | `--eval-window` | 100 | Episodios para evaluar |
 | `--steps-per-level` | 50000 | Min pasos por nivel |
 
+## PufferLib Integration
+
+Este proyecto usa [PufferLib](https://puffer.ai) para entrenamiento de alto rendimiento.
+
+### Arquitectura
+
+- **Policy**: ResNet con bloques residuales (basado en DeepCubeA)
+- **Trainer**: PPO con CleanRL optimizado de PufferLib
+- **Vectorizacion**: Multiprocessing para paralelismo
+
+### Comandos PufferLib
+
+```bash
+# Entrenamiento basico
+python train_puffer.py
+
+# Con curriculum learning
+python train_puffer.py --mode curriculum
+
+# Ver opciones
+python train_puffer.py --help
+```
+
+### Configuracion
+
+Edita `config/rubiks_cube.ini` para cambiar hiperparametros:
+
+```ini
+[train]
+total_timesteps = 50_000_000
+learning_rate = 0.0003
+device = cuda
+
+[policy]
+hidden_size = 512
+num_residual_blocks = 4
+```
+
 ## Referencias
 
 - McAleer, S., et al. "Solving the Rubik's Cube with Deep Reinforcement Learning and Search." arXiv:1805.07470 (2019)
 - Silver, D., et al. "Mastering the game of Go with deep neural networks and tree search." Nature (2016)
+- PufferLib: https://puffer.ai
