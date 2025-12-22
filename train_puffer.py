@@ -181,6 +181,9 @@ if __name__ == "__main__":
         args['train']['total_timesteps'] = 10_000_000
     if args['train'].get('learning_rate') is None:
         args['train']['learning_rate'] = 3e-4
+    # Ajustar batch sizes para nuestro entorno
+    args['train']['minibatch_size'] = 256
+    args['train']['batch_size'] = 2048
 
     # Crear vectorized environment
     vecenv = pufferlib.vector.make(
@@ -190,8 +193,8 @@ if __name__ == "__main__":
             'max_steps': 50,
             'reward_mode': 'sparse',
         },
-        num_envs=4,
-        num_workers=4,
+        num_envs=32,  # Mas entornos paralelos
+        num_workers=8,
         backend=pufferlib.vector.Multiprocessing,
     )
 
