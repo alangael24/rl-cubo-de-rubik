@@ -12,6 +12,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import gymnasium
 
 import pufferlib
 import pufferlib.pytorch
@@ -58,10 +59,10 @@ class RubiksPufferEnv(pufferlib.PufferEnv):
         self.max_steps = max_steps
 
         # Espacios
-        self.single_observation_space = pufferlib.spaces.Box(
+        self.single_observation_space = gymnasium.spaces.Box(
             low=0.0, high=1.0, shape=(324,), dtype=np.float32
         )
-        self.single_action_space = pufferlib.spaces.Discrete(12)
+        self.single_action_space = gymnasium.spaces.Discrete(12)
 
         # Para PufferLib
         self.num_agents = num_envs
