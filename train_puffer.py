@@ -113,7 +113,8 @@ class RubiksPufferEnv(pufferlib.PufferEnv):
         self._episode_returns[:] = 0
         self._episode_lengths[:] = 0
         self.tick = 0
-        return self.observations, {}
+        # PufferLib requiere info como lista de dicts
+        return self.observations, [{} for _ in range(self._num_envs)]
 
     def step(self, actions):
         self.actions[:] = actions
@@ -139,14 +140,17 @@ class RubiksPufferEnv(pufferlib.PufferEnv):
 
         self.tick += 1
 
-        # Info para logging
-        info = {
-            'episode_return': float(np.mean(self._episode_returns)),
-            'episode_length': float(np.mean(self._episode_lengths)),
-            'solved': self._solved_count / max(1, self._episode_count),
-        }
+        # Info para logging (PufferLib requiere lista de dicts)
+        infos = []
+        for i in range(self._num_envs):
+            info_i = {}
+            if dones[i]:
+                info_i['episode_return'] = float(self._episode_returns[i])
+                info_i['episode_length'] = int(self._episode_lengths[i])
+                info_i['solved'] = bool(terms[i])
+            infos.append(info_i)
 
-        return self.observations, self.rewards, self.terminals, self.truncations, info
+        return self.observations, self.rewards, self.terminals, self.truncations, infos
 
     def close(self):
         pass
