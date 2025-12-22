@@ -175,7 +175,7 @@ def train_simple():
 
     # Crear vectorized environment
     vecenv = pufferlib.vector.make(
-        env_creator=make_env,
+        make_env,  # Primera posicion (positional)
         env_kwargs={
             'scramble_moves': 1,
             'max_steps': 50,
@@ -183,7 +183,6 @@ def train_simple():
         },
         num_envs=4,           # Procesos paralelos
         num_workers=4,
-        batch_size=1,
         backend=pufferlib.vector.Multiprocessing,
     )
 
@@ -269,7 +268,7 @@ def train_with_curriculum():
 
         # Crear environment con dificultad actual
         vecenv = pufferlib.vector.make(
-            env_creator=make_env,
+            make_env,  # Primera posicion (positional)
             env_kwargs={
                 'scramble_moves': current_scramble,
                 'max_steps': max(50, current_scramble * 3),
@@ -277,7 +276,6 @@ def train_with_curriculum():
             },
             num_envs=4,
             num_workers=4,
-            batch_size=1,
             backend=pufferlib.vector.Multiprocessing,
         )
 
