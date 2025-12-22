@@ -94,8 +94,8 @@ class RubiksPufferEnv(pufferlib.PufferEnv):
         # Copiar resultados a buffers compartidos (inevitable sin modificar el binding C)
         np.copyto(self.observations, obs)
         np.copyto(self.rewards, rewards)
-        np.copyto(self.terminals, terms)
-        np.copyto(self.truncations, truncs)
+        self.terminals[:] = terms.astype(bool)
+        self.truncations[:] = truncs.astype(bool)
 
         # Info solo cada report_interval (como Snake)
         info = []
