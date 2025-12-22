@@ -6,13 +6,13 @@ Uso:
     python train_puffer.py
 
     # Con GPU
-    python train_puffer.py --device cuda
+    python train_puffer.py --train.device cuda
 
-    # Cambiar hiperparametros
-    python train_puffer.py --train.total_timesteps 50_000_000
+    # Cambiar timesteps
+    python train_puffer.py --train.total-timesteps 50000000
 
     # Ver todas las opciones
-    python train_puffer.py --help
+    python train_puffer.py -h
 """
 
 import numpy as np
@@ -164,33 +164,40 @@ def env_creator(env_name='rubiks_cube'):
 
 
 # ============================================================================
-# Entrenamiento con PufferLib
+# Entrenamiento con PufferLib CLI oficial
 # ============================================================================
 
-def train_simple():
-    """Entrenamiento simple usando PuffeRL directamente."""
+if __name__ == "__main__":
     print("=" * 60)
     print("ENTRENAMIENTO CUBO DE RUBIK CON PUFFERLIB")
     print("=" * 60)
 
+    # Cargar configuracion (esto parsea los argumentos CLI automaticamente)
+    args = pufferl.load_config('default')
+
+    # Sobreescribir defaults para nuestro entorno
+    args['train']['env'] = 'rubiks_cube'
+    if args['train'].get('total_timesteps') is None:
+        args['train']['total_timesteps'] = 10_000_000
+    if args['train'].get('learning_rate') is None:
+        args['train']['learning_rate'] = 3e-4
+
     # Crear vectorized environment
     vecenv = pufferlib.vector.make(
-        make_env,  # Primera posicion (positional)
+        make_env,
         env_kwargs={
             'scramble_moves': 1,
             'max_steps': 50,
             'reward_mode': 'sparse',
         },
-        num_envs=4,           # Procesos paralelos
+        num_envs=4,
         num_workers=4,
         backend=pufferlib.vector.Multiprocessing,
     )
 
     # Crear policy
+    device = args['train'].get('device', 'cuda' if torch.cuda.is_available() else 'cpu')
     policy = Policy(vecenv.driver_env, hidden_size=512, num_residual_blocks=4)
-
-    # Mover a GPU si disponible
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
     policy = policy.to(device)
 
     print(f"\nPolicy ResNet:")
@@ -198,31 +205,19 @@ def train_simple():
     print(f"  Residual blocks: 4")
     print(f"  Parameters: {sum(p.numel() for p in policy.parameters()):,}")
     print(f"  Device: {device}")
-
-    # Cargar config default y modificar
-    args = pufferl.load_config('default')
-    args['train']['env'] = 'rubiks_cube'
-    args['train']['total_timesteps'] = 10_000_000
-    args['train']['learning_rate'] = 3e-4
-    args['train']['device'] = device
+    print(f"  Total timesteps: {args['train']['total_timesteps']:,}")
+    print("=" * 60)
 
     # Crear trainer
     trainer = pufferl.PuffeRL(args['train'], vecenv, policy)
 
     print(f"\nIniciando entrenamiento...")
-    print(f"  Total timesteps: {args['train']['total_timesteps']:,}")
-    print("=" * 60)
 
     # Loop de entrenamiento
     try:
         while trainer.epoch < trainer.total_epochs:
             trainer.evaluate()
             logs = trainer.train()
-
-            # Mostrar progreso cada 10 epochs
-            if trainer.epoch % 10 == 0:
-                print(f"Epoch {trainer.epoch}/{trainer.total_epochs} | "
-                      f"Steps: {trainer.global_step:,}")
 
     except KeyboardInterrupt:
         print("\nEntrenamiento interrumpido por el usuario")
@@ -239,99 +234,3 @@ def train_simple():
     print(f"\nModelo guardado en rubik_puffer.pt")
 
     trainer.close()
-
-
-def train_with_curriculum():
-    """Entrenamiento con curriculum learning (aumentar dificultad progresivamente)."""
-    print("=" * 60)
-    print("ENTRENAMIENTO CON CURRICULUM LEARNING")
-    print("=" * 60)
-
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    current_scramble = 1
-    max_scramble = 20
-    success_threshold = 0.8
-    timesteps_per_level = 1_000_000
-
-    # Crear policy
-    dummy_env = make_env(scramble_moves=1)
-    policy = Policy(dummy_env, hidden_size=512, num_residual_blocks=4).to(device)
-    dummy_env.close()
-
-    print(f"Device: {device}")
-    print(f"Scramble inicial: {current_scramble}")
-    print(f"Scramble maximo: {max_scramble}")
-    print("=" * 60)
-
-    while current_scramble <= max_scramble:
-        print(f"\n>>> NIVEL {current_scramble}: {current_scramble} scramble moves <<<")
-
-        # Crear environment con dificultad actual
-        vecenv = pufferlib.vector.make(
-            make_env,  # Primera posicion (positional)
-            env_kwargs={
-                'scramble_moves': current_scramble,
-                'max_steps': max(50, current_scramble * 3),
-                'reward_mode': 'sparse',
-            },
-            num_envs=4,
-            num_workers=4,
-            backend=pufferlib.vector.Multiprocessing,
-        )
-
-        # Configurar trainer
-        args = pufferl.load_config('default')
-        args['train']['env'] = f'rubiks_cube_scramble_{current_scramble}'
-        args['train']['total_timesteps'] = timesteps_per_level
-        args['train']['learning_rate'] = 3e-4
-        args['train']['device'] = device
-
-        trainer = pufferl.PuffeRL(args['train'], vecenv, policy)
-
-        # Entrenar este nivel
-        try:
-            while trainer.epoch < trainer.total_epochs:
-                trainer.evaluate()
-                logs = trainer.train()
-        except KeyboardInterrupt:
-            print("\nInterrumpido")
-            break
-
-        trainer.close()
-
-        # Avanzar al siguiente nivel
-        current_scramble += 1
-        print(f"Avanzando a scramble {current_scramble}...")
-
-    # Guardar modelo final
-    torch.save({
-        'policy_state_dict': policy.state_dict(),
-        'scramble_level': current_scramble - 1,
-    }, 'rubik_puffer_curriculum.pt')
-    print(f"\nModelo guardado en rubik_puffer_curriculum.pt")
-
-
-# ============================================================================
-# Main con argumentos CLI
-# ============================================================================
-
-if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Entrenar Cubo de Rubik con PufferLib")
-    parser.add_argument("--mode", type=str, default="simple",
-                        choices=["simple", "curriculum"],
-                        help="Modo de entrenamiento")
-    parser.add_argument("--device", type=str, default="auto",
-                        choices=["auto", "cuda", "cpu"],
-                        help="Device para entrenamiento")
-
-    args = parser.parse_args()
-
-    if args.device == "auto":
-        args.device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    if args.mode == "simple":
-        train_simple()
-    else:
-        train_with_curriculum()
