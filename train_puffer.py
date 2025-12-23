@@ -311,7 +311,9 @@ if __name__ == "__main__":
                 if solve_rate >= success_threshold:
                     current_scramble += 1
                     env.set_scramble(current_scramble)
-                    env.reset_stats()
+
+                # SIEMPRE resetear stats para medir solo la ventana actual
+                env.reset_stats()
 
     except KeyboardInterrupt:
         print("\nInterrumpido")
