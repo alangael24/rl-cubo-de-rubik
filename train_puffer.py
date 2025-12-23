@@ -103,6 +103,9 @@ class RubiksPufferEnv(pufferlib.PufferEnv):
         self._c_env.scramble_moves = n
         print(f"  >>> CURRICULUM: scramble_moves = {n} <<<")
 
+    def set_max_steps(self, n):
+        self._c_env.max_steps = n
+
     def close(self):
         pass
 
@@ -276,7 +279,7 @@ if __name__ == "__main__":
 
     vecenv = pufferlib.vector.make(
         RubiksPufferEnv,
-        env_kwargs={'num_envs': NUM_ENVS, 'scramble_moves': 1, 'max_steps': 50},
+        env_kwargs={'num_envs': NUM_ENVS, 'scramble_moves': 1, 'max_steps': 50, 'reward_mode': 'dense'},
         num_envs=1,
         backend=pufferlib.PufferEnv,
     )
@@ -307,6 +310,10 @@ if __name__ == "__main__":
         else:
             return 0.40
 
+    def get_max_steps(scramble):
+        """max_steps crece con scramble para evitar truncaciones."""
+        return min(50 + scramble * 5, 200)  # 50 base, +5 por nivel, cap 200
+
     env = vecenv.envs[0] if hasattr(vecenv, 'envs') else vecenv
 
     try:
@@ -324,6 +331,8 @@ if __name__ == "__main__":
                 if solve_rate >= threshold:
                     current_scramble += 1
                     env.set_scramble(current_scramble)
+                    env.set_max_steps(get_max_steps(current_scramble))
+                    print(f"  >>> max_steps = {get_max_steps(current_scramble)} <<<")
 
             trainer.train()
 

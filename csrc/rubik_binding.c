@@ -326,12 +326,33 @@ static int RubikBatchEnvObject_set_scramble_moves(RubikBatchEnvObject* self, PyO
     return 0;
 }
 
+static PyObject* RubikBatchEnvObject_get_max_steps(RubikBatchEnvObject* self, void* closure) {
+    return PyLong_FromLong(self->batch.max_steps);
+}
+
+static int RubikBatchEnvObject_set_max_steps(RubikBatchEnvObject* self, PyObject* value, void* closure) {
+    if (!PyLong_Check(value)) {
+        PyErr_SetString(PyExc_TypeError, "max_steps must be an integer");
+        return -1;
+    }
+    int val = (int)PyLong_AsLong(value);
+    val = val > 0 ? (val < 500 ? val : 500) : 1;
+    self->batch.max_steps = val;
+    for (int i = 0; i < self->batch.num_envs; i++) {
+        self->batch.envs[i].max_steps = val;
+    }
+    return 0;
+}
+
 static PyGetSetDef RubikBatchEnvObject_getsetters[] = {
     {"num_envs", (getter)RubikBatchEnvObject_get_num_envs, NULL,
      "Number of environments", NULL},
     {"scramble_moves", (getter)RubikBatchEnvObject_get_scramble_moves,
      (setter)RubikBatchEnvObject_set_scramble_moves,
      "Number of scramble moves", NULL},
+    {"max_steps", (getter)RubikBatchEnvObject_get_max_steps,
+     (setter)RubikBatchEnvObject_set_max_steps,
+     "Maximum steps per episode", NULL},
     {NULL}
 };
 
