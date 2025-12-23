@@ -123,6 +123,90 @@ class ResidualBlock(nn.Module):
         return F.relu(self.ln2(self.fc2(F.relu(self.ln1(self.fc1(x))))) + x)
 
 
+def create_cube_rotations():
+    """
+    Crea las 24 permutaciones de stickers para rotaciones del cubo completo.
+    Observation: 54 stickers x 6 colores (one-hot) = 324 valores.
+    Faces: F(0-8), B(9-17), U(18-26), D(27-35), L(36-44), R(45-53)
+    """
+    def rotate_face_cw(stickers):
+        """Rota los 9 stickers de una cara en sentido horario."""
+        return [stickers[6], stickers[3], stickers[0],
+                stickers[7], stickers[4], stickers[1],
+                stickers[8], stickers[5], stickers[2]]
+
+    def rotate_face_ccw(stickers):
+        """Rota los 9 stickers de una cara en sentido antihorario."""
+        return [stickers[2], stickers[5], stickers[8],
+                stickers[1], stickers[4], stickers[7],
+                stickers[0], stickers[3], stickers[6]]
+
+    def rotate_face_180(stickers):
+        return rotate_face_cw(rotate_face_cw(stickers))
+
+    def get_face(perm, face_idx):
+        return perm[face_idx*9:(face_idx+1)*9]
+
+    def set_face(perm, face_idx, stickers):
+        perm[face_idx*9:(face_idx+1)*9] = stickers
+
+    # Identidad
+    identity = list(range(54))
+
+    # Rotación X (alrededor del eje R-L): F->U->B->D->F
+    def rot_x(perm):
+        new_perm = perm.copy()
+        # F -> U, U -> B (rotado 180), B -> D, D -> F
+        set_face(new_perm, 2, get_face(perm, 0))  # U = F
+        set_face(new_perm, 1, rotate_face_180(get_face(perm, 2)))  # B = U rotado 180
+        set_face(new_perm, 3, get_face(perm, 1))  # D = B
+        set_face(new_perm, 0, rotate_face_180(get_face(perm, 3)))  # F = D rotado 180
+        set_face(new_perm, 5, rotate_face_cw(get_face(perm, 5)))   # R rota CW
+        set_face(new_perm, 4, rotate_face_ccw(get_face(perm, 4)))  # L rota CCW
+        return new_perm
+
+    # Rotación Y (alrededor del eje U-D): F->L->B->R->F
+    def rot_y(perm):
+        new_perm = perm.copy()
+        set_face(new_perm, 4, get_face(perm, 0))  # L = F
+        set_face(new_perm, 1, get_face(perm, 4))  # B = L
+        set_face(new_perm, 5, get_face(perm, 1))  # R = B
+        set_face(new_perm, 0, get_face(perm, 5))  # F = R
+        set_face(new_perm, 2, rotate_face_cw(get_face(perm, 2)))   # U rota CW
+        set_face(new_perm, 3, rotate_face_ccw(get_face(perm, 3)))  # D rota CCW
+        return new_perm
+
+    # Rotación Z (alrededor del eje F-B): U->R->D->L->U
+    def rot_z(perm):
+        new_perm = perm.copy()
+        set_face(new_perm, 5, rotate_face_cw(get_face(perm, 2)))   # R = U rotado CW
+        set_face(new_perm, 3, rotate_face_cw(get_face(perm, 5)))   # D = R rotado CW
+        set_face(new_perm, 4, rotate_face_cw(get_face(perm, 3)))   # L = D rotado CW
+        set_face(new_perm, 2, rotate_face_cw(get_face(perm, 4)))   # U = L rotado CW
+        set_face(new_perm, 0, rotate_face_cw(get_face(perm, 0)))   # F rota CW
+        set_face(new_perm, 1, rotate_face_ccw(get_face(perm, 1)))  # B rota CCW
+        return new_perm
+
+    # Generar las 24 rotaciones
+    rotations = set()
+    queue = [identity]
+    while queue:
+        perm = queue.pop(0)
+        perm_tuple = tuple(perm)
+        if perm_tuple in rotations:
+            continue
+        rotations.add(perm_tuple)
+        queue.append(rot_x(perm))
+        queue.append(rot_y(perm))
+        queue.append(rot_z(perm))
+
+    return [list(r) for r in rotations]
+
+
+# Pre-computar rotaciones como tensor
+CUBE_ROTATIONS = create_cube_rotations()  # 24 permutaciones
+
+
 class Policy(nn.Module):
     def __init__(self, env, hidden_size=512, num_blocks=4):
         super().__init__()
@@ -135,8 +219,33 @@ class Policy(nn.Module):
         self.actor = pufferlib.pytorch.layer_init(nn.Linear(hidden_size, act), std=0.01)
         self.critic = pufferlib.pytorch.layer_init(nn.Linear(hidden_size, 1), std=1.0)
 
+        # Pre-computar índices de permutación para augmentation (24 rotaciones x 324 índices)
+        # Cada rotación permuta los 54 stickers, y cada sticker es one-hot de 6 colores
+        perm_indices = []
+        for rot in CUBE_ROTATIONS:
+            indices = []
+            for sticker_idx in rot:
+                # Cada sticker tiene 6 valores one-hot
+                for color in range(6):
+                    indices.append(sticker_idx * 6 + color)
+            perm_indices.append(indices)
+        self.register_buffer('rot_indices', torch.tensor(perm_indices, dtype=torch.long))
+
+    def augment(self, x):
+        """Aplica una rotación aleatoria del cubo a cada observación."""
+        batch_size = x.shape[0]
+        # Seleccionar rotación aleatoria para cada muestra
+        rot_idx = torch.randint(0, 24, (batch_size,), device=x.device)
+        # Aplicar permutación
+        indices = self.rot_indices[rot_idx]  # (batch_size, 324)
+        return torch.gather(x, 1, indices)
+
     def forward(self, x, state=None):
-        x = F.relu(self.input_ln(self.input_fc(x.float().view(x.shape[0], -1))))
+        x = x.float().view(x.shape[0], -1)
+        # Augmentation durante training
+        if self.training:
+            x = self.augment(x)
+        x = F.relu(self.input_ln(self.input_fc(x)))
         for block in self.blocks:
             x = block(x)
         return self.actor(x), self.critic(x)
