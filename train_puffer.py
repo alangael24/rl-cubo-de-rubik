@@ -48,7 +48,7 @@ class RubiksPufferEnv(pufferlib.PufferEnv):
         # Inicializar buffers via parent class
         super().__init__(buf)
 
-        # Crear entorno C con punteros a nuestros buffers
+        # Crear entorno C
         reward_mode_int = 0 if reward_mode == 'sparse' else 1
         self._c_env = rubik_c.RubikBatchEnv(
             num_envs=num_envs,
@@ -58,6 +58,18 @@ class RubiksPufferEnv(pufferlib.PufferEnv):
             step_penalty=0.01,
             reward_mode=reward_mode_int,
             seed=seed,
+        )
+
+        # Buffers temporales para terminals/truncations (C usa uint8, PufferLib usa bool)
+        self._terms_u8 = np.zeros(num_envs, dtype=np.uint8)
+        self._truncs_u8 = np.zeros(num_envs, dtype=np.uint8)
+
+        # ZERO-COPY: Pasar buffers de PufferLib directamente a C
+        self._c_env.set_buffers(
+            self.observations,
+            self.rewards,
+            self._terms_u8,
+            self._truncs_u8
         )
 
         self._num_envs = num_envs
@@ -73,9 +85,8 @@ class RubiksPufferEnv(pufferlib.PufferEnv):
 
     def reset(self, seed=None):
         self.tick = 0
-        obs, _ = self._c_env.reset()
-        # Escribir directamente al buffer compartido
-        np.copyto(self.observations, obs)
+        # C escribe directo a self.observations (zero-copy)
+        self._c_env.reset()
         self.rewards.fill(0)
         self.terminals.fill(False)
         self.truncations.fill(False)
@@ -88,26 +99,24 @@ class RubiksPufferEnv(pufferlib.PufferEnv):
         self.actions[:] = actions
         self.tick += 1
 
-        # Llamar a C - esto es lo mas rapido posible
-        obs, rewards, terms, truncs, _ = self._c_env.step(actions.astype(np.int32))
+        # Llamar a C - escribe DIRECTO a self.observations y self.rewards (zero-copy)
+        self._c_env.step(actions.astype(np.int32))
 
-        # Copiar resultados a buffers compartidos (inevitable sin modificar el binding C)
-        np.copyto(self.observations, obs)
-        np.copyto(self.rewards, rewards)
-        self.terminals[:] = terms.astype(bool)
-        self.truncations[:] = truncs.astype(bool)
+        # Solo terminals/truncations necesitan conversion uint8 -> bool
+        self.terminals[:] = self._terms_u8.view(bool)
+        self.truncations[:] = self._truncs_u8.view(bool)
 
         # Info solo cada report_interval (como Snake)
         info = []
         if self.tick % self.report_interval == 0:
-            dones = terms | truncs
+            dones = self.terminals | self.truncations
             n_done = np.sum(dones)
             if n_done > 0:
-                n_solved = np.sum(terms)
+                n_solved = np.sum(self.terminals)
                 self._total_episodes += n_done
                 self._total_solved += n_solved
                 info.append({
-                    'episode_return': float(np.mean(rewards[dones])) if n_done > 0 else 0,
+                    'episode_return': float(np.mean(self.rewards[dones])) if n_done > 0 else 0,
                     'episode_length': float(self.tick),
                     'solved': float(self._total_solved) / max(1, self._total_episodes),
                 })

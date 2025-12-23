@@ -335,11 +335,61 @@ static PyGetSetDef RubikBatchEnvObject_getsetters[] = {
     {NULL}
 };
 
+static PyObject* RubikBatchEnvObject_set_buffers(RubikBatchEnvObject* self, PyObject* args) {
+    PyArrayObject *obs, *rewards, *terminals, *truncations;
+
+    if (!PyArg_ParseTuple(args, "O!O!O!O!",
+            &PyArray_Type, &obs,
+            &PyArray_Type, &rewards,
+            &PyArray_Type, &terminals,
+            &PyArray_Type, &truncations)) {
+        return NULL;
+    }
+
+    // Validate shapes
+    if (PyArray_NDIM(obs) != 2 || PyArray_DIM(obs, 0) != self->batch.num_envs || PyArray_DIM(obs, 1) != OBS_SIZE) {
+        PyErr_SetString(PyExc_ValueError, "obs must be (num_envs, 324)");
+        return NULL;
+    }
+    if (PyArray_NDIM(rewards) != 1 || PyArray_DIM(rewards, 0) != self->batch.num_envs) {
+        PyErr_SetString(PyExc_ValueError, "rewards must be (num_envs,)");
+        return NULL;
+    }
+
+    // Release old arrays
+    Py_XDECREF(self->obs_array);
+    Py_XDECREF(self->reward_array);
+    Py_XDECREF(self->terminal_array);
+    Py_XDECREF(self->truncation_array);
+
+    // Take ownership of new arrays
+    Py_INCREF(obs);
+    Py_INCREF(rewards);
+    Py_INCREF(terminals);
+    Py_INCREF(truncations);
+
+    self->obs_array = obs;
+    self->reward_array = rewards;
+    self->terminal_array = terminals;
+    self->truncation_array = truncations;
+
+    // Update C pointers to write directly to these buffers
+    batch_env_set_buffers(&self->batch,
+        (float*)PyArray_DATA(obs),
+        (float*)PyArray_DATA(rewards),
+        (uint8_t*)PyArray_DATA(terminals),
+        (uint8_t*)PyArray_DATA(truncations));
+
+    Py_RETURN_NONE;
+}
+
 static PyMethodDef RubikBatchEnvObject_methods[] = {
     {"reset", (PyCFunction)RubikBatchEnvObject_reset, METH_NOARGS,
      "Reset all environments"},
     {"step", (PyCFunction)RubikBatchEnvObject_step, METH_VARARGS,
      "Take a step in all environments"},
+    {"set_buffers", (PyCFunction)RubikBatchEnvObject_set_buffers, METH_VARARGS,
+     "Set external buffers for zero-copy operation"},
     {NULL}
 };
 
