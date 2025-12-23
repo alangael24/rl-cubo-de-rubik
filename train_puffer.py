@@ -96,15 +96,14 @@ class RubiksPufferEnv(pufferlib.PufferEnv):
         return self.observations, []
 
     def step(self, actions):
-        self.actions[:] = actions
         self.tick += 1
 
         # Llamar a C - escribe DIRECTO a self.observations y self.rewards (zero-copy)
-        self._c_env.step(actions.astype(np.int32))
+        self._c_env.step(actions)
 
         # Solo terminals/truncations necesitan conversion uint8 -> bool
-        self.terminals[:] = self._terms_u8.view(bool)
-        self.truncations[:] = self._truncs_u8.view(bool)
+        np.copyto(self.terminals, self._terms_u8.view(bool))
+        np.copyto(self.truncations, self._truncs_u8.view(bool))
 
         # Info solo cada report_interval (como Snake)
         info = []
@@ -185,7 +184,7 @@ if __name__ == "__main__":
     args['train']['minibatch_size'] = 4096
     args['train']['bptt_horizon'] = 16
 
-    NUM_ENVS = 8192  # Mas envs = mas throughput
+    NUM_ENVS = 32768  # Mas envs = mas throughput
 
     vecenv = pufferlib.vector.make(
         RubiksPufferEnv,
