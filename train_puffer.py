@@ -35,92 +35,52 @@ class RubiksPufferEnv(pufferlib.PufferEnv):
     """
 
     def __init__(self, num_envs=4096, scramble_moves=1, max_steps=50,
-                 reward_mode='sparse', report_interval=64, buf=None, seed=0, **kwargs):
+                 reward_mode='sparse', buf=None, seed=0, **kwargs):
 
         self.single_observation_space = gymnasium.spaces.Box(
             low=0.0, high=1.0, shape=(324,), dtype=np.float32
         )
         self.single_action_space = gymnasium.spaces.Discrete(12)
         self.num_agents = num_envs
-        self.report_interval = report_interval
-        self.tick = 0
 
         # Inicializar buffers via parent class
         super().__init__(buf)
 
         # Crear entorno C
-        reward_mode_int = 0 if reward_mode == 'sparse' else 1
         self._c_env = rubik_c.RubikBatchEnv(
             num_envs=num_envs,
             scramble_moves=scramble_moves,
             max_steps=max_steps,
             solve_reward=1.0,
             step_penalty=0.01,
-            reward_mode=reward_mode_int,
+            reward_mode=0 if reward_mode == 'sparse' else 1,
             seed=seed,
         )
 
-        # Buffers temporales para terminals/truncations (C usa uint8, PufferLib usa bool)
+        # Buffers uint8 para terminals/truncations
         self._terms_u8 = np.zeros(num_envs, dtype=np.uint8)
         self._truncs_u8 = np.zeros(num_envs, dtype=np.uint8)
 
-        # ZERO-COPY: Pasar buffers de PufferLib directamente a C
-        self._c_env.set_buffers(
-            self.observations,
-            self.rewards,
-            self._terms_u8,
-            self._truncs_u8
-        )
-
-        self._num_envs = num_envs
-        self._scramble_moves = scramble_moves
-
-        # Stats para logging (solo cada report_interval)
-        self._total_solved = 0
-        self._total_episodes = 0
+        # ZERO-COPY: C escribe directo a estos buffers
+        self._c_env.set_buffers(self.observations, self.rewards, self._terms_u8, self._truncs_u8)
 
     @property
     def emulated(self):
         return None
 
     def reset(self, seed=None):
-        self.tick = 0
-        # C escribe directo a self.observations (zero-copy)
         self._c_env.reset()
-        self.rewards.fill(0)
-        self.terminals.fill(False)
-        self.truncations.fill(False)
-        self.masks.fill(True)
-        self._total_solved = 0
-        self._total_episodes = 0
         return self.observations, []
 
     def step(self, actions):
-        self.tick += 1
-
-        # Llamar a C - escribe DIRECTO a self.observations y self.rewards (zero-copy)
+        # Llamar a C - escribe DIRECTO a buffers
         self._c_env.step(actions)
 
-        # Solo terminals/truncations necesitan conversion uint8 -> bool
-        np.copyto(self.terminals, self._terms_u8.view(bool))
-        np.copyto(self.truncations, self._truncs_u8.view(bool))
+        # Conversion uint8 -> bool (necesario para PufferLib)
+        self.terminals[:] = self._terms_u8
+        self.truncations[:] = self._truncs_u8
 
-        # Info solo cada report_interval (como Snake)
-        info = []
-        if self.tick % self.report_interval == 0:
-            dones = self.terminals | self.truncations
-            n_done = np.sum(dones)
-            if n_done > 0:
-                n_solved = np.sum(self.terminals)
-                self._total_episodes += n_done
-                self._total_solved += n_solved
-                info.append({
-                    'episode_return': float(np.mean(self.rewards[dones])) if n_done > 0 else 0,
-                    'episode_length': float(self.tick),
-                    'solved': float(self._total_solved) / max(1, self._total_episodes),
-                })
-
-        return self.observations, self.rewards, self.terminals, self.truncations, info
+        return self.observations, self.rewards, self.terminals, self.truncations, []
 
     def close(self):
         pass
