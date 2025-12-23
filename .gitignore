@@ -42,5 +42,11 @@ wandb/
 # Environments
 .env
 .venv
+.venv_linux/
 venv/
 ENV/
+
+# Security - never commit
+*.pem
+private_key*
+*.key

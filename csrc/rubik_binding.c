@@ -336,6 +336,7 @@ static int RubikBatchEnvObject_set_max_steps(RubikBatchEnvObject* self, PyObject
         return -1;
     }
     int val = (int)PyLong_AsLong(value);
+    if (val == -1 && PyErr_Occurred()) return -1;
     val = val > 0 ? (val < 500 ? val : 500) : 1;
     self->batch.max_steps = val;
     for (int i = 0; i < self->batch.num_envs; i++) {

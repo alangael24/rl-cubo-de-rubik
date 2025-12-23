@@ -298,6 +298,8 @@ if __name__ == "__main__":
     current_scramble = 1
     max_scramble = 20
     check_interval = 50  # Check every N epochs
+    consecutive_passes = 0  # Hysteresis: necesita 3 evals seguidas para avanzar
+    required_passes = 3
 
     def get_threshold(scramble):
         """Threshold adaptativo: más fácil en niveles altos."""
@@ -326,13 +328,18 @@ if __name__ == "__main__":
             if trainer.epoch % check_interval == 0 and current_scramble < max_scramble:
                 solve_rate = env.get_solve_rate()
                 threshold = get_threshold(current_scramble)
-                print(f"  [Epoch {trainer.epoch}] Scramble={current_scramble}, Solve={solve_rate:.1%}, Need={threshold:.0%}")
+                print(f"  [Epoch {trainer.epoch}] Scramble={current_scramble}, Solve={solve_rate:.1%}, Need={threshold:.0%}, Passes={consecutive_passes}/{required_passes}")
 
                 if solve_rate >= threshold:
-                    current_scramble += 1
-                    env.set_scramble(current_scramble)
-                    env.set_max_steps(get_max_steps(current_scramble))
-                    print(f"  >>> max_steps = {get_max_steps(current_scramble)} <<<")
+                    consecutive_passes += 1
+                    if consecutive_passes >= required_passes:
+                        current_scramble += 1
+                        env.set_scramble(current_scramble)
+                        env.set_max_steps(get_max_steps(current_scramble))
+                        print(f"  >>> max_steps = {get_max_steps(current_scramble)} <<<")
+                        consecutive_passes = 0
+                else:
+                    consecutive_passes = 0  # Reset si falla
 
             trainer.train()
 
