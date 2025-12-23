@@ -176,7 +176,7 @@ if __name__ == "__main__":
     )
 
     device = args['train'].get('device', 'cuda' if torch.cuda.is_available() else 'cpu')
-    policy = Policy(vecenv, hidden_size=128, num_blocks=1).to(device)
+    policy = Policy(vecenv, hidden_size=512, num_blocks=4).to(device)
 
     print(f"\n  Params: {sum(p.numel() for p in policy.parameters()):,}")
     print(f"  Device: {device}")
