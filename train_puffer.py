@@ -242,9 +242,6 @@ class Policy(nn.Module):
 
     def forward(self, x, state=None):
         x = x.float().view(x.shape[0], -1)
-        # Augmentation durante training
-        if self.training:
-            x = self.augment(x)
         x = F.relu(self.input_ln(self.input_fc(x)))
         for block in self.blocks:
             x = block(x)
