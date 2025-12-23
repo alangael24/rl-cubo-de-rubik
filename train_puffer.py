@@ -294,26 +294,38 @@ if __name__ == "__main__":
     # Curriculum learning settings
     current_scramble = 1
     max_scramble = 20
-    success_threshold = 0.7  # 70% solve rate to advance
     check_interval = 50  # Check every N epochs
+
+    def get_threshold(scramble):
+        """Threshold adaptativo: más fácil en niveles altos."""
+        if scramble <= 5:
+            return 0.70
+        elif scramble <= 10:
+            return 0.60
+        elif scramble <= 15:
+            return 0.50
+        else:
+            return 0.40
+
+    env = vecenv.envs[0] if hasattr(vecenv, 'envs') else vecenv
 
     try:
         while trainer.epoch < trainer.total_epochs:
+            # Reset stats ANTES de evaluate para medir solo evaluación
+            env.reset_stats()
             trainer.evaluate()
-            trainer.train()
 
-            # Curriculum: check solve rate and advance
+            # Leer solve rate DESPUÉS de evaluate (no incluye train con exploración)
             if trainer.epoch % check_interval == 0 and current_scramble < max_scramble:
-                env = vecenv.envs[0] if hasattr(vecenv, 'envs') else vecenv
                 solve_rate = env.get_solve_rate()
-                print(f"  [Epoch {trainer.epoch}] Scramble={current_scramble}, Solve rate={solve_rate:.1%}")
+                threshold = get_threshold(current_scramble)
+                print(f"  [Epoch {trainer.epoch}] Scramble={current_scramble}, Solve={solve_rate:.1%}, Need={threshold:.0%}")
 
-                if solve_rate >= success_threshold:
+                if solve_rate >= threshold:
                     current_scramble += 1
                     env.set_scramble(current_scramble)
 
-                # SIEMPRE resetear stats para medir solo la ventana actual
-                env.reset_stats()
+            trainer.train()
 
     except KeyboardInterrupt:
         print("\nInterrumpido")
