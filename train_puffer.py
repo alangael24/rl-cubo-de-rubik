@@ -157,13 +157,6 @@ if __name__ == "__main__":
     device = args['train'].get('device', 'cuda' if torch.cuda.is_available() else 'cpu')
     policy = Policy(vecenv, hidden_size=128, num_blocks=1).to(device)
 
-    # Compilar para velocidad máxima (PyTorch 2.0+)
-    try:
-        policy = torch.compile(policy, mode='max-autotune')
-        print("  torch.compile: ENABLED")
-    except:
-        print("  torch.compile: NOT AVAILABLE")
-
     print(f"\n  Params: {sum(p.numel() for p in policy.parameters()):,}")
     print(f"  Device: {device}")
     print(f"  Envs: {NUM_ENVS}")
