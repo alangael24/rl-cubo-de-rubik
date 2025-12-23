@@ -141,10 +141,11 @@ if __name__ == "__main__":
     args['train']['env'] = 'rubiks_cube'
     args['train']['total_timesteps'] = args['train'].get('total_timesteps', 10_000_000)
     args['train']['learning_rate'] = 3e-4
-    args['train']['minibatch_size'] = 4096
-    args['train']['bptt_horizon'] = 16
+    args['train']['minibatch_size'] = 65536
+    args['train']['bptt_horizon'] = 8
+    args['train']['update_epochs'] = 1
 
-    NUM_ENVS = 32768  # Mas envs = mas throughput
+    NUM_ENVS = 65536  # Mas envs = mas throughput
 
     vecenv = pufferlib.vector.make(
         RubiksPufferEnv,
