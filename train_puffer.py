@@ -64,6 +64,10 @@ class RubiksPufferEnv(pufferlib.PufferEnv):
         # ZERO-COPY: C escribe directo a estos buffers
         self._c_env.set_buffers(self.observations, self.rewards, self._terms_u8, self._truncs_u8)
 
+        # Stats para curriculum learning
+        self._episode_solved = 0
+        self._episode_count = 0
+
     @property
     def emulated(self):
         return None
@@ -80,7 +84,24 @@ class RubiksPufferEnv(pufferlib.PufferEnv):
         self.terminals[:] = self._terms_u8
         self.truncations[:] = self._truncs_u8
 
+        # Track solved episodes para curriculum
+        self._episode_solved += self.terminals.sum()
+        self._episode_count += (self.terminals | self.truncations).sum()
+
         return self.observations, self.rewards, self.terminals, self.truncations, []
+
+    def get_solve_rate(self):
+        if self._episode_count == 0:
+            return 0.0
+        return float(self._episode_solved) / float(self._episode_count)
+
+    def reset_stats(self):
+        self._episode_solved = 0
+        self._episode_count = 0
+
+    def set_scramble(self, n):
+        self._c_env.scramble_moves = n
+        print(f"  >>> CURRICULUM: scramble_moves = {n} <<<")
 
     def close(self):
         pass
@@ -164,13 +185,32 @@ if __name__ == "__main__":
 
     trainer = pufferl.PuffeRL(args['train'], vecenv, policy)
 
+    # Curriculum learning settings
+    current_scramble = 1
+    max_scramble = 20
+    success_threshold = 0.7  # 70% solve rate to advance
+    check_interval = 50  # Check every N epochs
+
     try:
         while trainer.epoch < trainer.total_epochs:
             trainer.evaluate()
             trainer.train()
+
+            # Curriculum: check solve rate and advance
+            if trainer.epoch % check_interval == 0 and current_scramble < max_scramble:
+                env = vecenv.envs[0] if hasattr(vecenv, 'envs') else vecenv
+                solve_rate = env.get_solve_rate()
+                print(f"  [Epoch {trainer.epoch}] Scramble={current_scramble}, Solve rate={solve_rate:.1%}")
+
+                if solve_rate >= success_threshold:
+                    current_scramble += 1
+                    env.set_scramble(current_scramble)
+                    env.reset_stats()
+
     except KeyboardInterrupt:
         print("\nInterrumpido")
 
     trainer.print_dashboard()
     torch.save({'policy_state_dict': policy.state_dict()}, 'rubik_puffer.pt')
+    print(f"\nFinal scramble level: {current_scramble}")
     trainer.close()
