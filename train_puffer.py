@@ -285,7 +285,7 @@ if __name__ == "__main__":
     args['train']['bptt_horizon'] = 8
     args['train']['update_epochs'] = 1
 
-    NUM_ENVS = 73728  # Sweep step 1: higher throughput with minimal quality risk.
+    NUM_ENVS = 81920  # Sweep step 2: push throughput ceiling, validate learning holds.
 
     vecenv = pufferlib.vector.make(
         RubiksPufferEnv,
