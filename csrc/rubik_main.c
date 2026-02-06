@@ -38,7 +38,7 @@ void benchmark(int num_steps, int num_envs) {
 
     // Initialize batch environment
     RubikBatchEnv batch;
-    batch_env_init(&batch, num_envs, 20, 100, 1.0f, 0.01f, 0, 42);
+    batch_env_init(&batch, num_envs, 20, 100, 1.0f, 0.01f, 0, OBS_MODE_ONEHOT, 42);
     batch_env_set_buffers(&batch, observations, rewards, terminals, truncations);
     batch_env_reset(&batch);
 
@@ -117,7 +117,7 @@ int main() {
     float reward;
     uint8_t terminal, truncation;
 
-    env_init(&env, 5, 50, 1.0f, 0.01f, 0, 42);
+    env_init(&env, 5, 50, 1.0f, 0.01f, 0, OBS_MODE_ONEHOT, 42);
     env.observations = obs;
     env.rewards = &reward;
     env.terminals = &terminal;

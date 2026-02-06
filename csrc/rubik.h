@@ -53,8 +53,14 @@
 #define MOVE_R  10
 #define MOVE_RP 11  // R'
 
-// Observation size (one-hot encoding: 54 stickers * 6 colors)
-#define OBS_SIZE 324
+// Observation sizes
+#define OBS_TOKEN_SIZE TOTAL_STICKERS
+#define OBS_ONEHOT_SIZE (TOTAL_STICKERS * NUM_FACES)
+#define OBS_SIZE OBS_ONEHOT_SIZE  // Backward-compatible alias
+
+// Observation encoding modes
+#define OBS_MODE_ONEHOT 0
+#define OBS_MODE_TOKEN 1
 
 // ============================================================================
 // Cube state structure
@@ -88,8 +94,11 @@ typedef struct {
     // RNG state (xorshift64)
     uint64_t rng_state;
 
+    // Observation mode
+    int obs_mode;  // OBS_MODE_ONEHOT or OBS_MODE_TOKEN
+
     // Buffers for PufferLib (pointers to shared memory)
-    float* observations;
+    void* observations;
     float* rewards;
     uint8_t* terminals;
     uint8_t* truncations;
@@ -545,7 +554,7 @@ static inline void cube_scramble(RubiksCube* cube, int num_moves, uint64_t* rng)
 
 static inline void env_init(RubikEnv* env, int scramble_moves, int max_steps,
                            float solve_reward, float step_penalty, int reward_mode,
-                           uint64_t seed) {
+                           int obs_mode, uint64_t seed) {
     cube_init(&env->cube);
     env->scramble_moves = scramble_moves;
     env->max_steps = max_steps;
@@ -555,6 +564,7 @@ static inline void env_init(RubikEnv* env, int scramble_moves, int max_steps,
     env->step_count = 0;
     env->prev_correct = TOTAL_STICKERS;
     env->done = false;
+    env->obs_mode = obs_mode;
     env->rng_state = seed ? seed : 42;
 
     // Initialize buffer pointers to NULL (will be set by Python)
@@ -564,20 +574,28 @@ static inline void env_init(RubikEnv* env, int scramble_moves, int max_steps,
     env->truncations = NULL;
 }
 
-// Write one-hot observation to buffer
+// Write observation to buffer in selected encoding
 static inline void env_write_obs(RubikEnv* env) {
     if (env->observations == NULL) return;
 
-    // Zero the observation buffer
-    memset(env->observations, 0, OBS_SIZE * sizeof(float));
-
-    // Write one-hot encoding
-    for (int face = 0; face < NUM_FACES; face++) {
-        for (int i = 0; i < STICKERS_PER_FACE; i++) {
-            int sticker_idx = face * STICKERS_PER_FACE + i;
-            int color = env->cube.state[face][i];
-            int obs_idx = sticker_idx * NUM_FACES + color;
-            env->observations[obs_idx] = 1.0f;
+    if (env->obs_mode == OBS_MODE_TOKEN) {
+        uint8_t* out = (uint8_t*)env->observations;
+        for (int face = 0; face < NUM_FACES; face++) {
+            for (int i = 0; i < STICKERS_PER_FACE; i++) {
+                int sticker_idx = face * STICKERS_PER_FACE + i;
+                out[sticker_idx] = env->cube.state[face][i];
+            }
+        }
+    } else {
+        float* out = (float*)env->observations;
+        memset(out, 0, OBS_ONEHOT_SIZE * sizeof(float));
+        for (int face = 0; face < NUM_FACES; face++) {
+            for (int i = 0; i < STICKERS_PER_FACE; i++) {
+                int sticker_idx = face * STICKERS_PER_FACE + i;
+                int color = env->cube.state[face][i];
+                int obs_idx = sticker_idx * NUM_FACES + color;
+                out[obs_idx] = 1.0f;
+            }
         }
     }
 }
@@ -668,24 +686,26 @@ typedef struct {
     float solve_reward;
     float step_penalty;
     int reward_mode;
+    int obs_mode;
 } RubikBatchEnv;
 
 static inline void batch_env_init(RubikBatchEnv* batch, int num_envs,
                                   int scramble_moves, int max_steps,
                                   float solve_reward, float step_penalty,
-                                  int reward_mode, uint64_t seed) {
+                                  int reward_mode, int obs_mode, uint64_t seed) {
     batch->num_envs = num_envs;
     batch->scramble_moves = scramble_moves;
     batch->max_steps = max_steps;
     batch->solve_reward = solve_reward;
     batch->step_penalty = step_penalty;
     batch->reward_mode = reward_mode;
+    batch->obs_mode = obs_mode;
 
     batch->envs = (RubikEnv*)malloc(num_envs * sizeof(RubikEnv));
 
     for (int i = 0; i < num_envs; i++) {
         env_init(&batch->envs[i], scramble_moves, max_steps,
-                 solve_reward, step_penalty, reward_mode, seed + i);
+                 solve_reward, step_penalty, reward_mode, obs_mode, seed + i);
     }
 }
 
@@ -697,12 +717,16 @@ static inline void batch_env_free(RubikBatchEnv* batch) {
 }
 
 static inline void batch_env_set_buffers(RubikBatchEnv* batch,
-                                         float* observations,
+                                         void* observations,
                                          float* rewards,
                                          uint8_t* terminals,
                                          uint8_t* truncations) {
     for (int i = 0; i < batch->num_envs; i++) {
-        batch->envs[i].observations = observations + i * OBS_SIZE;
+        if (batch->obs_mode == OBS_MODE_TOKEN) {
+            batch->envs[i].observations = ((uint8_t*)observations) + i * OBS_TOKEN_SIZE;
+        } else {
+            batch->envs[i].observations = ((float*)observations) + i * OBS_ONEHOT_SIZE;
+        }
         batch->envs[i].rewards = rewards + i;
         batch->envs[i].terminals = terminals + i;
         batch->envs[i].truncations = truncations + i;

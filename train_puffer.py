@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import gymnasium
+import argparse
 
 import pufferlib
 import pufferlib.pytorch
@@ -35,11 +36,19 @@ class RubiksPufferEnv(pufferlib.PufferEnv):
     """
 
     def __init__(self, num_envs=4096, scramble_moves=1, max_steps=50,
-                 reward_mode='sparse', buf=None, seed=0, **kwargs):
+                 reward_mode='sparse', obs_mode='onehot', buf=None, seed=0, **kwargs):
+        self.obs_mode = obs_mode
+        if obs_mode == 'token':
+            self.single_observation_space = gymnasium.spaces.Box(
+                low=0, high=5, shape=(rubik_c.OBS_TOKEN_SIZE,), dtype=np.uint8
+            )
+            c_obs_mode = rubik_c.OBS_MODE_TOKEN
+        else:
+            self.single_observation_space = gymnasium.spaces.Box(
+                low=0.0, high=1.0, shape=(rubik_c.OBS_ONEHOT_SIZE,), dtype=np.float32
+            )
+            c_obs_mode = rubik_c.OBS_MODE_ONEHOT
 
-        self.single_observation_space = gymnasium.spaces.Box(
-            low=0.0, high=1.0, shape=(324,), dtype=np.float32
-        )
         self.single_action_space = gymnasium.spaces.Discrete(12)
         self.num_agents = num_envs
 
@@ -54,6 +63,7 @@ class RubiksPufferEnv(pufferlib.PufferEnv):
             solve_reward=1.0,
             step_penalty=0.01,
             reward_mode=0 if reward_mode == 'sparse' else 1,
+            obs_mode=c_obs_mode,
             seed=seed,
         )
 
@@ -212,9 +222,10 @@ CUBE_ROTATIONS = create_cube_rotations()  # 24 permutaciones
 
 
 class Policy(nn.Module):
-    def __init__(self, env, hidden_size=512, num_blocks=4):
+    def __init__(self, env, hidden_size=512, num_blocks=4, obs_mode='onehot'):
         super().__init__()
-        obs = np.prod(env.single_observation_space.shape)
+        self.obs_mode = obs_mode
+        obs = rubik_c.OBS_ONEHOT_SIZE if obs_mode == 'token' else int(np.prod(env.single_observation_space.shape))
         act = env.single_action_space.n
 
         self.input_fc = pufferlib.pytorch.layer_init(nn.Linear(obs, hidden_size))
@@ -245,7 +256,13 @@ class Policy(nn.Module):
         return torch.gather(x, 1, indices)
 
     def forward(self, x, state=None):
-        x = x.float().view(x.shape[0], -1)
+        if self.obs_mode == 'token':
+            x = x.view(x.shape[0], -1).long()
+            x = torch.clamp(x, 0, 5)
+            # Keep model input equivalent to one-hot baseline for safer learning transfer.
+            x = F.one_hot(x, num_classes=6).float().reshape(x.shape[0], -1)
+        else:
+            x = x.float().view(x.shape[0], -1)
         x = F.relu(self.input_ln(self.input_fc(x)))
         for block in self.blocks:
             x = block(x)
@@ -260,6 +277,11 @@ class Policy(nn.Module):
 # ============================================================================
 
 if __name__ == "__main__":
+    cli = argparse.ArgumentParser(add_help=False)
+    cli.add_argument("--obs-mode", choices=["onehot", "token"], default="onehot")
+    cli_args, _ = cli.parse_known_args()
+    obs_mode = cli_args.obs_mode
+
     if not C_BACKEND:
         print("ERROR: Backend C no disponible")
         exit(1)
@@ -290,17 +312,24 @@ if __name__ == "__main__":
 
     vecenv = pufferlib.vector.make(
         RubiksPufferEnv,
-        env_kwargs={'num_envs': NUM_ENVS, 'scramble_moves': 1, 'max_steps': 50, 'reward_mode': 'dense'},
+        env_kwargs={
+            'num_envs': NUM_ENVS,
+            'scramble_moves': 1,
+            'max_steps': 50,
+            'reward_mode': 'dense',
+            'obs_mode': obs_mode,
+        },
         num_envs=1,
         backend=pufferlib.PufferEnv,
     )
 
     device = args['train'].get('device', 'cuda' if torch.cuda.is_available() else 'cpu')
-    policy = Policy(vecenv, hidden_size=256, num_blocks=2).to(device)
+    policy = Policy(vecenv, hidden_size=256, num_blocks=2, obs_mode=obs_mode).to(device)
 
     print(f"\n  Params: {sum(p.numel() for p in policy.parameters()):,}")
     print(f"  Device: {device}")
     print(f"  Envs: {NUM_ENVS}")
+    print(f"  Obs mode: {obs_mode}")
     print("=" * 60)
 
     trainer = pufferl.PuffeRL(args['train'], vecenv, policy)

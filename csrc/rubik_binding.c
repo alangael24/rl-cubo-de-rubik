@@ -45,30 +45,37 @@ static PyObject* RubikEnvObject_new(PyTypeObject* type, PyObject* args, PyObject
 
 static int RubikEnvObject_init(RubikEnvObject* self, PyObject* args, PyObject* kwds) {
     static char* kwlist[] = {"scramble_moves", "max_steps", "solve_reward",
-                             "step_penalty", "reward_mode", "seed", NULL};
+                             "step_penalty", "reward_mode", "obs_mode", "seed", NULL};
 
     int scramble_moves = 1;
     int max_steps = 50;
     float solve_reward = 1.0f;
     float step_penalty = 0.01f;
     int reward_mode = 0;  // 0 = sparse
+    int obs_mode = OBS_MODE_ONEHOT;
     unsigned long long seed = 42;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "|iiffiK", kwlist,
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "|iiffiiK", kwlist,
                                      &scramble_moves, &max_steps, &solve_reward,
-                                     &step_penalty, &reward_mode, &seed)) {
+                                     &step_penalty, &reward_mode, &obs_mode, &seed)) {
+        return -1;
+    }
+
+    if (obs_mode != OBS_MODE_ONEHOT && obs_mode != OBS_MODE_TOKEN) {
+        PyErr_SetString(PyExc_ValueError, "obs_mode must be 0 (onehot) or 1 (token)");
         return -1;
     }
 
     // Initialize environment
     env_init(&self->env, scramble_moves, max_steps, solve_reward,
-             step_penalty, reward_mode, (uint64_t)seed);
+             step_penalty, reward_mode, obs_mode, (uint64_t)seed);
 
     // Create numpy arrays for buffers
-    npy_intp obs_dims[1] = {OBS_SIZE};
+    npy_intp obs_dims[1] = {obs_mode == OBS_MODE_TOKEN ? OBS_TOKEN_SIZE : OBS_ONEHOT_SIZE};
     npy_intp scalar_dims[1] = {1};
+    int obs_dtype = obs_mode == OBS_MODE_TOKEN ? NPY_UINT8 : NPY_FLOAT32;
 
-    self->obs_array = (PyArrayObject*)PyArray_ZEROS(1, obs_dims, NPY_FLOAT32, 0);
+    self->obs_array = (PyArrayObject*)PyArray_ZEROS(1, obs_dims, obs_dtype, 0);
     self->reward_array = (PyArrayObject*)PyArray_ZEROS(1, scalar_dims, NPY_FLOAT32, 0);
     self->terminal_array = (PyArrayObject*)PyArray_ZEROS(1, scalar_dims, NPY_BOOL, 0);
     self->truncation_array = (PyArrayObject*)PyArray_ZEROS(1, scalar_dims, NPY_BOOL, 0);
@@ -79,7 +86,7 @@ static int RubikEnvObject_init(RubikEnvObject* self, PyObject* args, PyObject* k
     }
 
     // Set buffer pointers
-    self->env.observations = (float*)PyArray_DATA(self->obs_array);
+    self->env.observations = PyArray_DATA(self->obs_array);
     self->env.rewards = (float*)PyArray_DATA(self->reward_array);
     self->env.terminals = (uint8_t*)PyArray_DATA(self->terminal_array);
     self->env.truncations = (uint8_t*)PyArray_DATA(self->truncation_array);
@@ -206,7 +213,7 @@ static PyObject* RubikBatchEnvObject_new(PyTypeObject* type, PyObject* args, PyO
 
 static int RubikBatchEnvObject_init(RubikBatchEnvObject* self, PyObject* args, PyObject* kwds) {
     static char* kwlist[] = {"num_envs", "scramble_moves", "max_steps", "solve_reward",
-                             "step_penalty", "reward_mode", "seed", NULL};
+                             "step_penalty", "reward_mode", "obs_mode", "seed", NULL};
 
     int num_envs = 1;
     int scramble_moves = 1;
@@ -214,23 +221,30 @@ static int RubikBatchEnvObject_init(RubikBatchEnvObject* self, PyObject* args, P
     float solve_reward = 1.0f;
     float step_penalty = 0.01f;
     int reward_mode = 0;
+    int obs_mode = OBS_MODE_ONEHOT;
     unsigned long long seed = 42;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "|iiiffiK", kwlist,
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "|iiiffiiK", kwlist,
                                      &num_envs, &scramble_moves, &max_steps,
-                                     &solve_reward, &step_penalty, &reward_mode, &seed)) {
+                                     &solve_reward, &step_penalty, &reward_mode, &obs_mode, &seed)) {
+        return -1;
+    }
+
+    if (obs_mode != OBS_MODE_ONEHOT && obs_mode != OBS_MODE_TOKEN) {
+        PyErr_SetString(PyExc_ValueError, "obs_mode must be 0 (onehot) or 1 (token)");
         return -1;
     }
 
     // Initialize batch environment
     batch_env_init(&self->batch, num_envs, scramble_moves, max_steps,
-                   solve_reward, step_penalty, reward_mode, (uint64_t)seed);
+                   solve_reward, step_penalty, reward_mode, obs_mode, (uint64_t)seed);
 
     // Create numpy arrays
-    npy_intp obs_dims[2] = {num_envs, OBS_SIZE};
+    npy_intp obs_dims[2] = {num_envs, obs_mode == OBS_MODE_TOKEN ? OBS_TOKEN_SIZE : OBS_ONEHOT_SIZE};
     npy_intp vec_dims[1] = {num_envs};
+    int obs_dtype = obs_mode == OBS_MODE_TOKEN ? NPY_UINT8 : NPY_FLOAT32;
 
-    self->obs_array = (PyArrayObject*)PyArray_ZEROS(2, obs_dims, NPY_FLOAT32, 0);
+    self->obs_array = (PyArrayObject*)PyArray_ZEROS(2, obs_dims, obs_dtype, 0);
     self->reward_array = (PyArrayObject*)PyArray_ZEROS(1, vec_dims, NPY_FLOAT32, 0);
     self->terminal_array = (PyArrayObject*)PyArray_ZEROS(1, vec_dims, NPY_BOOL, 0);
     self->truncation_array = (PyArrayObject*)PyArray_ZEROS(1, vec_dims, NPY_BOOL, 0);
@@ -242,7 +256,7 @@ static int RubikBatchEnvObject_init(RubikBatchEnvObject* self, PyObject* args, P
 
     // Set buffer pointers
     batch_env_set_buffers(&self->batch,
-        (float*)PyArray_DATA(self->obs_array),
+        PyArray_DATA(self->obs_array),
         (float*)PyArray_DATA(self->reward_array),
         (uint8_t*)PyArray_DATA(self->terminal_array),
         (uint8_t*)PyArray_DATA(self->truncation_array));
@@ -359,9 +373,15 @@ static PyObject* RubikBatchEnvObject_set_buffers(RubikBatchEnvObject* self, PyOb
         return NULL;
     }
 
-    // Validate shapes
-    if (PyArray_NDIM(obs) != 2 || PyArray_DIM(obs, 0) != self->batch.num_envs || PyArray_DIM(obs, 1) != OBS_SIZE) {
-        PyErr_SetString(PyExc_ValueError, "obs must be (num_envs, 324)");
+    // Validate observation shape/dtype for selected mode
+    int expected_obs = self->batch.obs_mode == OBS_MODE_TOKEN ? OBS_TOKEN_SIZE : OBS_ONEHOT_SIZE;
+    int expected_obs_dtype = self->batch.obs_mode == OBS_MODE_TOKEN ? NPY_UINT8 : NPY_FLOAT32;
+    if (PyArray_NDIM(obs) != 2 || PyArray_DIM(obs, 0) != self->batch.num_envs || PyArray_DIM(obs, 1) != expected_obs) {
+        PyErr_SetString(PyExc_ValueError, "obs has invalid shape for current obs_mode");
+        return NULL;
+    }
+    if (PyArray_TYPE(obs) != expected_obs_dtype || !PyArray_IS_C_CONTIGUOUS(obs)) {
+        PyErr_SetString(PyExc_ValueError, "obs has invalid dtype or is not contiguous for current obs_mode");
         return NULL;
     }
     if (PyArray_NDIM(rewards) != 1 || PyArray_DIM(rewards, 0) != self->batch.num_envs) {
@@ -388,7 +408,7 @@ static PyObject* RubikBatchEnvObject_set_buffers(RubikBatchEnvObject* self, PyOb
 
     // Update C pointers to write directly to these buffers
     batch_env_set_buffers(&self->batch,
-        (float*)PyArray_DATA(obs),
+        PyArray_DATA(obs),
         (float*)PyArray_DATA(rewards),
         (uint8_t*)PyArray_DATA(terminals),
         (uint8_t*)PyArray_DATA(truncations));
@@ -425,7 +445,11 @@ static PyTypeObject RubikBatchEnvType = {
 // ============================================================================
 
 static PyObject* rubik_c_get_obs_size(PyObject* self, PyObject* args) {
-    return PyLong_FromLong(OBS_SIZE);
+    return PyLong_FromLong(OBS_ONEHOT_SIZE);
+}
+
+static PyObject* rubik_c_get_token_obs_size(PyObject* self, PyObject* args) {
+    return PyLong_FromLong(OBS_TOKEN_SIZE);
 }
 
 static PyObject* rubik_c_get_num_actions(PyObject* self, PyObject* args) {
@@ -435,6 +459,8 @@ static PyObject* rubik_c_get_num_actions(PyObject* self, PyObject* args) {
 static PyMethodDef rubik_c_methods[] = {
     {"get_obs_size", rubik_c_get_obs_size, METH_NOARGS,
      "Get observation size (324)"},
+    {"get_token_obs_size", rubik_c_get_token_obs_size, METH_NOARGS,
+     "Get token observation size (54)"},
     {"get_num_actions", rubik_c_get_num_actions, METH_NOARGS,
      "Get number of actions (12)"},
     {NULL, NULL, 0, NULL}
@@ -473,7 +499,11 @@ PyMODINIT_FUNC PyInit_rubik_c(void) {
     }
 
     // Add constants
-    PyModule_AddIntConstant(m, "OBS_SIZE", OBS_SIZE);
+    PyModule_AddIntConstant(m, "OBS_SIZE", OBS_ONEHOT_SIZE);
+    PyModule_AddIntConstant(m, "OBS_ONEHOT_SIZE", OBS_ONEHOT_SIZE);
+    PyModule_AddIntConstant(m, "OBS_TOKEN_SIZE", OBS_TOKEN_SIZE);
+    PyModule_AddIntConstant(m, "OBS_MODE_ONEHOT", OBS_MODE_ONEHOT);
+    PyModule_AddIntConstant(m, "OBS_MODE_TOKEN", OBS_MODE_TOKEN);
     PyModule_AddIntConstant(m, "NUM_ACTIONS", NUM_ACTIONS);
 
     return m;
