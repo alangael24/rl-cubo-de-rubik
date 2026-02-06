@@ -687,6 +687,10 @@ typedef struct {
     float step_penalty;
     int reward_mode;
     int obs_mode;
+
+    // Episode stats for cheap curriculum metrics
+    uint64_t episode_solved;
+    uint64_t episode_done;
 } RubikBatchEnv;
 
 static inline void batch_env_init(RubikBatchEnv* batch, int num_envs,
@@ -700,6 +704,8 @@ static inline void batch_env_init(RubikBatchEnv* batch, int num_envs,
     batch->step_penalty = step_penalty;
     batch->reward_mode = reward_mode;
     batch->obs_mode = obs_mode;
+    batch->episode_solved = 0;
+    batch->episode_done = 0;
 
     batch->envs = (RubikEnv*)malloc(num_envs * sizeof(RubikEnv));
 
@@ -739,9 +745,22 @@ static inline void batch_env_reset(RubikBatchEnv* batch) {
     }
 }
 
+static inline void batch_env_reset_stats(RubikBatchEnv* batch) {
+    batch->episode_solved = 0;
+    batch->episode_done = 0;
+}
+
 static inline void batch_env_step(RubikBatchEnv* batch, int* actions) {
     for (int i = 0; i < batch->num_envs; i++) {
         env_step(&batch->envs[i], actions[i]);
+        uint8_t terminal = batch->envs[i].terminals ? batch->envs[i].terminals[0] : 0;
+        uint8_t truncation = batch->envs[i].truncations ? batch->envs[i].truncations[0] : 0;
+        if (terminal || truncation) {
+            batch->episode_done++;
+            if (terminal) {
+                batch->episode_solved++;
+            }
+        }
     }
 }
 

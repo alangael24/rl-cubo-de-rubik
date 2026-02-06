@@ -76,10 +76,6 @@ class RubiksPufferEnv(pufferlib.PufferEnv):
             self.truncations,
         )
 
-        # Stats para curriculum learning
-        self._episode_solved = 0
-        self._episode_count = 0
-
     @property
     def emulated(self):
         return None
@@ -96,20 +92,16 @@ class RubiksPufferEnv(pufferlib.PufferEnv):
             actions_i32 = np.asarray(actions, dtype=np.int32)
         self._c_env.step(actions_i32)
 
-        # Track solved episodes para curriculum
-        self._episode_solved += self.terminals.sum()
-        self._episode_count += (self.terminals | self.truncations).sum()
-
         return self.observations, self.rewards, self.terminals, self.truncations, []
 
     def get_solve_rate(self):
-        if self._episode_count == 0:
+        solved, done = self._c_env.get_stats()
+        if done == 0:
             return 0.0
-        return float(self._episode_solved) / float(self._episode_count)
+        return float(solved) / float(done)
 
     def reset_stats(self):
-        self._episode_solved = 0
-        self._episode_count = 0
+        self._c_env.reset_stats()
 
     def set_scramble(self, n):
         self._c_env.scramble_moves = n

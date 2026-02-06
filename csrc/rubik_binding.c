@@ -309,6 +309,17 @@ static PyObject* RubikBatchEnvObject_step(RubikBatchEnvObject* self, PyObject* a
         Py_None);
 }
 
+static PyObject* RubikBatchEnvObject_get_stats(RubikBatchEnvObject* self, PyObject* args) {
+    return Py_BuildValue("(KK)",
+        (unsigned long long)self->batch.episode_solved,
+        (unsigned long long)self->batch.episode_done);
+}
+
+static PyObject* RubikBatchEnvObject_reset_stats(RubikBatchEnvObject* self, PyObject* args) {
+    batch_env_reset_stats(&self->batch);
+    Py_RETURN_NONE;
+}
+
 static PyObject* RubikBatchEnvObject_get_num_envs(RubikBatchEnvObject* self, void* closure) {
     return PyLong_FromLong(self->batch.num_envs);
 }
@@ -423,6 +434,10 @@ static PyMethodDef RubikBatchEnvObject_methods[] = {
      "Take a step in all environments"},
     {"set_buffers", (PyCFunction)RubikBatchEnvObject_set_buffers, METH_VARARGS,
      "Set external buffers for zero-copy operation"},
+    {"get_stats", (PyCFunction)RubikBatchEnvObject_get_stats, METH_NOARGS,
+     "Get episode stats as (solved, done)"},
+    {"reset_stats", (PyCFunction)RubikBatchEnvObject_reset_stats, METH_NOARGS,
+     "Reset episode stats counters"},
     {NULL}
 };
 
