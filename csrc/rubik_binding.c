@@ -309,6 +309,38 @@ static PyObject* RubikBatchEnvObject_step(RubikBatchEnvObject* self, PyObject* a
         Py_None);
 }
 
+static PyObject* RubikBatchEnvObject_step_inplace(RubikBatchEnvObject* self, PyObject* args) {
+    PyArrayObject* actions_array;
+
+    if (!PyArg_ParseTuple(args, "O!", &PyArray_Type, &actions_array)) {
+        return NULL;
+    }
+
+    if (PyArray_NDIM(actions_array) != 1 ||
+        PyArray_DIM(actions_array, 0) != self->batch.num_envs) {
+        PyErr_SetString(PyExc_ValueError, "actions must be 1D array with num_envs elements");
+        return NULL;
+    }
+
+    PyArrayObject* actions_int = actions_array;
+    int owns_actions = 0;
+    if (PyArray_TYPE(actions_array) != NPY_INT32 || !PyArray_IS_C_CONTIGUOUS(actions_array)) {
+        actions_int = (PyArrayObject*)PyArray_FROM_OTF(
+            (PyObject*)actions_array, NPY_INT32, NPY_ARRAY_IN_ARRAY);
+        if (!actions_int) return NULL;
+        owns_actions = 1;
+    }
+
+    int* actions = (int*)PyArray_DATA(actions_int);
+    batch_env_step(&self->batch, actions);
+
+    if (owns_actions) {
+        Py_DECREF(actions_int);
+    }
+
+    Py_RETURN_NONE;
+}
+
 static PyObject* RubikBatchEnvObject_get_stats(RubikBatchEnvObject* self, PyObject* args) {
     return Py_BuildValue("(KK)",
         (unsigned long long)self->batch.episode_solved,
@@ -432,6 +464,8 @@ static PyMethodDef RubikBatchEnvObject_methods[] = {
      "Reset all environments"},
     {"step", (PyCFunction)RubikBatchEnvObject_step, METH_VARARGS,
      "Take a step in all environments"},
+    {"step_inplace", (PyCFunction)RubikBatchEnvObject_step_inplace, METH_VARARGS,
+     "Take a step without allocating return tuple"},
     {"set_buffers", (PyCFunction)RubikBatchEnvObject_set_buffers, METH_VARARGS,
      "Set external buffers for zero-copy operation"},
     {"get_stats", (PyCFunction)RubikBatchEnvObject_get_stats, METH_NOARGS,

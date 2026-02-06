@@ -75,6 +75,7 @@ class RubiksPufferEnv(pufferlib.PufferEnv):
             self.terminals,
             self.truncations,
         )
+        self._actions_i32 = np.empty(self.num_agents, dtype=np.int32)
 
     @property
     def emulated(self):
@@ -85,12 +86,13 @@ class RubiksPufferEnv(pufferlib.PufferEnv):
         return self.observations, []
 
     def step(self, actions):
-        # Llamar a C - escribe DIRECTO a buffers
+        # Llamar a C - escribe DIRECTO a buffers y evita allocs de retorno
         if isinstance(actions, np.ndarray) and actions.dtype == np.int32 and actions.flags.c_contiguous:
             actions_i32 = actions
         else:
-            actions_i32 = np.asarray(actions, dtype=np.int32)
-        self._c_env.step(actions_i32)
+            np.copyto(self._actions_i32, np.asarray(actions), casting='unsafe')
+            actions_i32 = self._actions_i32
+        self._c_env.step_inplace(actions_i32)
 
         return self.observations, self.rewards, self.terminals, self.truncations, []
 
