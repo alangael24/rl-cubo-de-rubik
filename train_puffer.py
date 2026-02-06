@@ -284,6 +284,7 @@ if __name__ == "__main__":
     args['train']['minibatch_size'] = 65536
     args['train']['bptt_horizon'] = 8
     args['train']['update_epochs'] = 1
+    args['train']['checkpoint_interval'] = 1000  # Less disk I/O, same training behavior.
 
     NUM_ENVS = 81920  # Sweep step 2: push throughput ceiling, validate learning holds.
 
