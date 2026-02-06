@@ -268,9 +268,18 @@ if __name__ == "__main__":
     print("ENTRENAMIENTO CUBO DE RUBIK - OPTIMIZADO")
     print("=" * 60)
 
+    if torch.cuda.is_available():
+        # Faster matmul/convolution kernels on Ampere+ with minimal quality impact.
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True
+        torch.set_float32_matmul_precision("high")
+
     args = pufferl.load_config('default')
     args['train']['env'] = 'rubiks_cube'
     args['train']['total_timesteps'] = 5_000_000_000
+    args['train']['torch_deterministic'] = False
+    args['train']['precision'] = 'bfloat16'
     args['train']['learning_rate'] = 3e-4
     args['train']['minibatch_size'] = 65536
     args['train']['bptt_horizon'] = 8
