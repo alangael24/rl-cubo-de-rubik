@@ -9,6 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import gymnasium
 import argparse
+import sys
 
 import pufferlib
 import pufferlib.pytorch
@@ -279,8 +280,11 @@ class Policy(nn.Module):
 if __name__ == "__main__":
     cli = argparse.ArgumentParser(add_help=False)
     cli.add_argument("--obs-mode", choices=["onehot", "token"], default="onehot")
-    cli_args, _ = cli.parse_known_args()
+    cli_args, remaining_argv = cli.parse_known_args()
     obs_mode = cli_args.obs_mode
+    # pufferl.load_config() reparses sys.argv and errors on unknown args.
+    # Remove our custom arg first, keep all other args for puffer.
+    sys.argv = [sys.argv[0], *remaining_argv]
 
     if not C_BACKEND:
         print("ERROR: Backend C no disponible")
