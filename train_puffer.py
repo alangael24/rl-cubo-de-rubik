@@ -298,7 +298,7 @@ if __name__ == "__main__":
     args = pufferl.load_config('default')
     args['train']['env'] = 'rubiks_cube'
     args['train']['total_timesteps'] = 5_000_000_000
-    args['train']['torch_deterministic'] = True
+    args['train']['torch_deterministic'] = False
     args['train']['precision'] = 'float32'
     args['train']['learning_rate'] = 3e-4
     args['train']['minibatch_size'] = 65536
