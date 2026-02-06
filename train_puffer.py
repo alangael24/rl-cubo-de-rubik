@@ -302,7 +302,9 @@ if __name__ == "__main__":
     args['train']['precision'] = 'float32'
     args['train']['learning_rate'] = 3e-4
     args['train']['ent_coef'] = 0.05  # Keep exploration high to avoid premature convergence.
-    args['train']['batch_size'] = 1_048_576  # ~1M transitions/update for high-throughput exploration.
+    # Native PufferEnv rollout writes full env blocks; keep segments divisible by NUM_ENVS.
+    # batch_size = segments * bptt_horizon, with segments = 2 * NUM_ENVS here.
+    args['train']['batch_size'] = 1_310_720
     args['train']['minibatch_size'] = 65536
     args['train']['bptt_horizon'] = 8
     args['train']['update_epochs'] = 1
