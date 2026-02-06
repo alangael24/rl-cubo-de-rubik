@@ -70,8 +70,8 @@ static int RubikEnvObject_init(RubikEnvObject* self, PyObject* args, PyObject* k
 
     self->obs_array = (PyArrayObject*)PyArray_ZEROS(1, obs_dims, NPY_FLOAT32, 0);
     self->reward_array = (PyArrayObject*)PyArray_ZEROS(1, scalar_dims, NPY_FLOAT32, 0);
-    self->terminal_array = (PyArrayObject*)PyArray_ZEROS(1, scalar_dims, NPY_UINT8, 0);
-    self->truncation_array = (PyArrayObject*)PyArray_ZEROS(1, scalar_dims, NPY_UINT8, 0);
+    self->terminal_array = (PyArrayObject*)PyArray_ZEROS(1, scalar_dims, NPY_BOOL, 0);
+    self->truncation_array = (PyArrayObject*)PyArray_ZEROS(1, scalar_dims, NPY_BOOL, 0);
 
     if (!self->obs_array || !self->reward_array ||
         !self->terminal_array || !self->truncation_array) {
@@ -100,10 +100,8 @@ static PyObject* RubikEnvObject_reset(RubikEnvObject* self, PyObject* args) {
 
     env_reset(&self->env);
 
-    // Return observation and empty info dict
-    PyObject* info = PyDict_New();
-    Py_INCREF(self->obs_array);
-    return Py_BuildValue("(OO)", self->obs_array, info);
+    // Return observation and empty info placeholder
+    return Py_BuildValue("(OO)", self->obs_array, Py_None);
 }
 
 static PyObject* RubikEnvObject_step(RubikEnvObject* self, PyObject* args) {
@@ -120,19 +118,13 @@ static PyObject* RubikEnvObject_step(RubikEnvObject* self, PyObject* args) {
 
     env_step(&self->env, action);
 
-    // Build info dict
-    PyObject* info = PyDict_New();
-    PyDict_SetItemString(info, "solved",
-        self->env.terminals[0] ? Py_True : Py_False);
-
     // Return (obs, reward, terminal, truncation, info)
-    Py_INCREF(self->obs_array);
     return Py_BuildValue("(OdiiO)",
         self->obs_array,
         (double)self->env.rewards[0],
         (int)self->env.terminals[0],
         (int)self->env.truncations[0],
-        info);
+        Py_None);
 }
 
 static PyObject* RubikEnvObject_get_scramble_moves(RubikEnvObject* self, void* closure) {
@@ -240,8 +232,8 @@ static int RubikBatchEnvObject_init(RubikBatchEnvObject* self, PyObject* args, P
 
     self->obs_array = (PyArrayObject*)PyArray_ZEROS(2, obs_dims, NPY_FLOAT32, 0);
     self->reward_array = (PyArrayObject*)PyArray_ZEROS(1, vec_dims, NPY_FLOAT32, 0);
-    self->terminal_array = (PyArrayObject*)PyArray_ZEROS(1, vec_dims, NPY_UINT8, 0);
-    self->truncation_array = (PyArrayObject*)PyArray_ZEROS(1, vec_dims, NPY_UINT8, 0);
+    self->terminal_array = (PyArrayObject*)PyArray_ZEROS(1, vec_dims, NPY_BOOL, 0);
+    self->truncation_array = (PyArrayObject*)PyArray_ZEROS(1, vec_dims, NPY_BOOL, 0);
 
     if (!self->obs_array || !self->reward_array ||
         !self->terminal_array || !self->truncation_array) {
@@ -260,10 +252,7 @@ static int RubikBatchEnvObject_init(RubikBatchEnvObject* self, PyObject* args, P
 
 static PyObject* RubikBatchEnvObject_reset(RubikBatchEnvObject* self, PyObject* args) {
     batch_env_reset(&self->batch);
-
-    PyObject* info = PyDict_New();
-    Py_INCREF(self->obs_array);
-    return Py_BuildValue("(OO)", self->obs_array, info);
+    return Py_BuildValue("(OO)", self->obs_array, Py_None);
 }
 
 static PyObject* RubikBatchEnvObject_step(RubikBatchEnvObject* self, PyObject* args) {
@@ -280,28 +269,30 @@ static PyObject* RubikBatchEnvObject_step(RubikBatchEnvObject* self, PyObject* a
         return NULL;
     }
 
-    // Convert to int array
-    PyArrayObject* actions_int = (PyArrayObject*)PyArray_Cast(actions_array, NPY_INT32);
-    if (!actions_int) return NULL;
+    // Fast path: already int32 contiguous
+    PyArrayObject* actions_int = actions_array;
+    int owns_actions = 0;
+    if (PyArray_TYPE(actions_array) != NPY_INT32 || !PyArray_IS_C_CONTIGUOUS(actions_array)) {
+        actions_int = (PyArrayObject*)PyArray_FROM_OTF(
+            (PyObject*)actions_array, NPY_INT32, NPY_ARRAY_IN_ARRAY);
+        if (!actions_int) return NULL;
+        owns_actions = 1;
+    }
 
     int* actions = (int*)PyArray_DATA(actions_int);
     batch_env_step(&self->batch, actions);
 
-    Py_DECREF(actions_int);
+    if (owns_actions) {
+        Py_DECREF(actions_int);
+    }
 
     // Return (obs, rewards, terminals, truncations, info)
-    PyObject* info = PyDict_New();
-    Py_INCREF(self->obs_array);
-    Py_INCREF(self->reward_array);
-    Py_INCREF(self->terminal_array);
-    Py_INCREF(self->truncation_array);
-
     return Py_BuildValue("(OOOOO)",
         self->obs_array,
         self->reward_array,
         self->terminal_array,
         self->truncation_array,
-        info);
+        Py_None);
 }
 
 static PyObject* RubikBatchEnvObject_get_num_envs(RubikBatchEnvObject* self, void* closure) {

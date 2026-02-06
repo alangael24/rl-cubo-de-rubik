@@ -57,12 +57,13 @@ class RubiksPufferEnv(pufferlib.PufferEnv):
             seed=seed,
         )
 
-        # Buffers uint8 para terminals/truncations
-        self._terms_u8 = np.zeros(num_envs, dtype=np.uint8)
-        self._truncs_u8 = np.zeros(num_envs, dtype=np.uint8)
-
         # ZERO-COPY: C escribe directo a estos buffers
-        self._c_env.set_buffers(self.observations, self.rewards, self._terms_u8, self._truncs_u8)
+        self._c_env.set_buffers(
+            self.observations,
+            self.rewards,
+            self.terminals,
+            self.truncations,
+        )
 
         # Stats para curriculum learning
         self._episode_solved = 0
@@ -78,11 +79,11 @@ class RubiksPufferEnv(pufferlib.PufferEnv):
 
     def step(self, actions):
         # Llamar a C - escribe DIRECTO a buffers
-        self._c_env.step(actions)
-
-        # Conversion uint8 -> bool (necesario para PufferLib)
-        self.terminals[:] = self._terms_u8
-        self.truncations[:] = self._truncs_u8
+        if isinstance(actions, np.ndarray) and actions.dtype == np.int32 and actions.flags.c_contiguous:
+            actions_i32 = actions
+        else:
+            actions_i32 = np.asarray(actions, dtype=np.int32)
+        self._c_env.step(actions_i32)
 
         # Track solved episodes para curriculum
         self._episode_solved += self.terminals.sum()

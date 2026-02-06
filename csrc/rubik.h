@@ -642,9 +642,15 @@ static inline void env_step(RubikEnv* env, int action) {
     if (env->rewards) env->rewards[0] = reward;
     env_write_obs(env);
 
-    // Auto-reset if done
+    // Auto-reset if done, preserving step outputs for caller.
     if ((env->terminals && env->terminals[0]) || (env->truncations && env->truncations[0])) {
+        uint8_t terminal = env->terminals ? env->terminals[0] : 0;
+        uint8_t truncation = env->truncations ? env->truncations[0] : 0;
+        float step_reward = reward;
         env_reset(env);
+        if (env->rewards) env->rewards[0] = step_reward;
+        if (env->terminals) env->terminals[0] = terminal;
+        if (env->truncations) env->truncations[0] = truncation;
     }
 }
 

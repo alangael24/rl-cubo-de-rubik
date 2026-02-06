@@ -15,9 +15,12 @@ from gymnasium import spaces
 try:
     import rubik_c
     C_AVAILABLE = True
-except ImportError:
+except ImportError as e:
     C_AVAILABLE = False
-    print("Warning: rubik_c module not found. Run 'python setup.py build_ext --inplace'")
+    print(
+        "Warning: rubik_c module not found. Run 'python setup.py build_ext --inplace'. "
+        f"Error: {e}"
+    )
 
 
 class RubiksCubeEnvC(gym.Env):
@@ -94,14 +97,18 @@ class RubiksCubeEnvC(gym.Env):
             obs, info = self._env.reset(seed)
         else:
             obs, info = self._env.reset()
-        return np.asarray(obs, dtype=np.float32), info
+        if info is None:
+            info = {}
+        return obs, info
 
     def step(self, action):
         """Take a step in the environment."""
         result = self._env.step(int(action))
         obs, reward, terminated, truncated, info = result
+        if info is None:
+            info = {}
         return (
-            np.asarray(obs, dtype=np.float32),
+            obs,
             float(reward),
             bool(terminated),
             bool(truncated),
@@ -201,19 +208,31 @@ class RubiksCubeBatchEnvC:
     def reset(self, seed=None):
         """Reset all environments."""
         obs, info = self._env.reset()
-        return np.asarray(obs, dtype=np.float32), info
+        if info is None:
+            info = {}
+        return obs, info
 
     def step(self, actions):
         """Step all environments."""
-        actions = np.asarray(actions, dtype=np.int32)
-        obs, rewards, terminals, truncations, info = self._env.step(actions)
+        if isinstance(actions, np.ndarray) and actions.dtype == np.int32 and actions.flags.c_contiguous:
+            actions_i32 = actions
+        else:
+            actions_i32 = np.asarray(actions, dtype=np.int32)
+
+        obs, rewards, terminals, truncations, info = self._env.step(actions_i32)
+        if info is None:
+            info = {}
         return (
-            np.asarray(obs, dtype=np.float32),
-            np.asarray(rewards, dtype=np.float32),
-            np.asarray(terminals, dtype=bool),
-            np.asarray(truncations, dtype=bool),
+            obs,
+            rewards,
+            terminals,
+            truncations,
             info
         )
+
+    def reset_stats(self):
+        """Compatibility no-op used by some curriculum trainers."""
+        return None
 
     def close(self):
         """Close all environments."""

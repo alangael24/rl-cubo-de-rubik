@@ -284,7 +284,7 @@ class PPOTrainer:
     def collect_rollout(self):
         """Recolecta un rollout de experiencias."""
         obs, _ = self.env.reset()
-        obs = torch.FloatTensor(obs).to(self.device)
+        obs = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
 
         for step in range(self.num_steps):
             with torch.no_grad():
@@ -298,24 +298,22 @@ class PPOTrainer:
 
             # Step environment
             next_obs, rewards, terminals, truncations, infos = self.env.step(
-                action.cpu().numpy()
+                action.cpu().numpy().astype(np.int32, copy=False)
             )
 
             dones = np.logical_or(terminals, truncations)
 
-            self.rewards_buffer[step] = torch.FloatTensor(rewards).to(self.device)
-            self.dones_buffer[step] = torch.FloatTensor(dones).to(self.device)
+            self.rewards_buffer[step] = torch.as_tensor(rewards, dtype=torch.float32, device=self.device)
+            self.dones_buffer[step] = torch.as_tensor(dones, dtype=torch.float32, device=self.device)
 
-            # Track episodes
-            for i, done in enumerate(dones):
-                if done:
-                    solved = terminals[i]
-                    self.recent_solves.append(1 if solved else 0)
-                    self.episode_count += 1
-                    if solved:
-                        self.solve_count += 1
+            # Track episodes (vectorized)
+            if np.any(dones):
+                solved = np.asarray(terminals, dtype=np.uint8)[dones]
+                self.recent_solves.extend(solved.tolist())
+                self.episode_count += int(dones.sum())
+                self.solve_count += int(solved.sum())
 
-            obs = torch.FloatTensor(next_obs).to(self.device)
+            obs = torch.as_tensor(next_obs, dtype=torch.float32, device=self.device)
 
         # Compute returns with GAE
         with torch.no_grad():
