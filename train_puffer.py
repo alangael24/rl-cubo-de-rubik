@@ -37,7 +37,7 @@ class RubiksPufferEnv(pufferlib.PufferEnv):
     """
 
     def __init__(self, num_envs=4096, scramble_moves=1, max_steps=50,
-                 reward_mode='sparse', obs_mode='onehot', buf=None, seed=0, **kwargs):
+                 reward_mode='sparse', obs_mode='token', buf=None, seed=0, **kwargs):
         self.obs_mode = obs_mode
         if obs_mode == 'token':
             self.single_observation_space = gymnasium.spaces.Box(
@@ -223,7 +223,7 @@ CUBE_ROTATIONS = create_cube_rotations()  # 24 permutaciones
 
 
 class Policy(nn.Module):
-    def __init__(self, env, hidden_size=512, num_blocks=4, obs_mode='onehot'):
+    def __init__(self, env, hidden_size=512, num_blocks=4, obs_mode='token'):
         super().__init__()
         self.obs_mode = obs_mode
         obs = rubik_c.OBS_ONEHOT_SIZE if obs_mode == 'token' else int(np.prod(env.single_observation_space.shape))
@@ -279,7 +279,7 @@ class Policy(nn.Module):
 
 if __name__ == "__main__":
     cli = argparse.ArgumentParser(add_help=False)
-    cli.add_argument("--obs-mode", choices=["onehot", "token"], default="onehot")
+    cli.add_argument("--obs-mode", choices=["onehot", "token"], default="token")
     cli_args, remaining_argv = cli.parse_known_args()
     obs_mode = cli_args.obs_mode
     # pufferl.load_config() reparses sys.argv and errors on unknown args.
